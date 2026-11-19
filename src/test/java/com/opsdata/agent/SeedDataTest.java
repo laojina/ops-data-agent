@@ -50,12 +50,14 @@ class SeedDataTest {
         SeedDatabase.create(SEED_SCRIPT, database);
 
         try (Connection connection = open(database)) {
+            // 三个数字依次是异常记录数、去重后的异常订单数、总订单数。M02 应为 1/3。
             assertEquals("2,1,3", scalar(connection, """
                     SELECT count(e.order_id) || ',' || count(DISTINCT e.order_id) || ',' ||
                            count(DISTINCT o.order_id)
                     FROM orders o LEFT JOIN exceptions e ON e.order_id = o.order_id
                     WHERE o.order_id LIKE 'FIX-SEP-%'
                     """));
+            // 先验出库及时率 1/2，再验履约达成率 1/3。签收按日期比较，当天签收算达成。
             assertEquals("1,2,1,3", scalar(connection, """
                     SELECT count(CASE WHEN shipped_at <= promised_at THEN 1 END) || ',' ||
                            count(shipped_at) || ',' ||
