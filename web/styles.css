@@ -49,3 +49,8 @@ button {
 #query-status {
     color: #4d5c66;
 }
+
+#trace-output {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}

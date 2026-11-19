@@ -1,6 +1,6 @@
 # 经营数据问答 Agent
 
-这是 Java 17、Spring Boot 3.2 和 SQLite 的笔试项目基线。当前版本提供可重建的样例库、八条指标口径和查询页面骨架。
+这是 Java 17、Spring Boot 3.2 和 SQLite 的经营数据问答项目。当前可通过模型工具调用查询八条业务指标的口径。
 
 ## 运行
 
@@ -15,6 +15,20 @@ mvn test
 - 第一条从 `seed.sql` 重建 `data/ops.db`。脚本执行成功后才替换现有数据库。
 - 第二条启动网页。在控制台找到 `Open in browser:`，点击后面的网址。默认是 `http://localhost:8000/`。
 - 第三条运行基线测试。每项通过后会输出一行 `PASS`，Maven 最后汇总运行数、失败数、错误数和跳过数。测试使用临时数据库，可以独立运行。
+
+## 查询指标口径
+
+在项目根目录的本机配置文件 `.env.local` 中设置 `LLM_API_KEY=你的模型凭据`，也可以使用同名环境变量。默认连接 DeepSeek 官方 API 和 `deepseek-flash`。其他 OpenAI 兼容平台可另设 `LLM_BASE_URL` 与 `LLM_MODEL`。本机配置由 Git 忽略，换凭据后重启服务。
+
+启动网页并输入「运输异常率怎么算？」，也可以用 PowerShell 调用接口。
+
+```powershell
+$body = @{ session_id = 'stage2-demo'; question = '运输异常率怎么算？' } | ConvertTo-Json -Compress
+Invoke-RestMethod -Method Post -Uri 'http://localhost:8000/ask' -ContentType 'application/json; charset=utf-8' -Body ([Text.Encoding]::UTF8.GetBytes($body))
+```
+
+展开「查看调用记录」，可以看到模型生成的工具请求、Java 从 `data/metrics.json` 命中的 M02、模型最终答复。两次模型调用的 token 来自接口实际返回的 `usage`。工具记录包含输入、命中口径和耗时。删除所使用的 Key 并重启后，`/ask` 会返回 `status: error`。
+
 
 ## 查看 SQLite 数据
 
