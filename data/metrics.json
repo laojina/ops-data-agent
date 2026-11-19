@@ -85,6 +85,7 @@
     "denominator": null,
     "time_field": "orders.shipped_at",
     "dimensions": ["仓库", "区域", "周", "月"],
-    "unit": "元"
+    "unit": "元",
+    "aggregation": "sum"
   }
 ]
