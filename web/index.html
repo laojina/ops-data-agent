@@ -9,23 +9,33 @@
 </head>
 <body>
     <main>
-        <h1>经营数据问答 Agent</h1>
+        <header>
+            <h1>经营数据问答 Agent</h1>
+            <button id="new-chat" type="button">新对话</button>
+        </header>
+        <section id="query-history" aria-label="对话历史"></section>
         <form id="query-form">
             <label for="question">经营数据问题</label>
             <textarea id="question" rows="3" required
                       placeholder="例如：10 月华东区出库及时率是多少？"></textarea>
-            <button type="submit">提问</button>
+            <button id="submit-question" type="submit">提问</button>
         </form>
-        <p id="query-status" role="status">输入指标口径或查数问题。</p>
-        <div id="query-result" hidden><table id="result-table"></table></div>
-        <details id="query-sql" hidden>
-            <summary>查看实际执行的 SQL</summary>
-            <pre id="sql-output"></pre>
-        </details>
-        <details id="query-trace" hidden>
-            <summary>查看调用记录</summary>
-            <pre id="trace-output"></pre>
-        </details>
+        <p id="query-status" role="status"></p>
     </main>
+    <template id="turn-template">
+        <article class="turn">
+            <h2 class="turn-question"></h2>
+            <p class="turn-answer"></p>
+            <div class="turn-result" hidden><table></table></div>
+            <details class="turn-sql" hidden>
+                <summary>查看实际执行的 SQL</summary>
+                <pre></pre>
+            </details>
+            <details class="turn-trace" hidden>
+                <summary>查看调用记录</summary>
+                <pre></pre>
+            </details>
+        </article>
+    </template>
 </body>
 </html>
