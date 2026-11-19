@@ -13,10 +13,15 @@
         <form id="query-form">
             <label for="question">经营数据问题</label>
             <textarea id="question" rows="3" required
-                      placeholder="例如：运输异常率怎么算？"></textarea>
+                      placeholder="例如：10 月华东区出库及时率是多少？"></textarea>
             <button type="submit">提问</button>
         </form>
-        <p id="query-status" role="status">输入指标名称或口径问题。</p>
+        <p id="query-status" role="status">输入指标口径或查数问题。</p>
+        <div id="query-result" hidden><table id="result-table"></table></div>
+        <details id="query-sql" hidden>
+            <summary>查看实际执行的 SQL</summary>
+            <pre id="sql-output"></pre>
+        </details>
         <details id="query-trace" hidden>
             <summary>查看调用记录</summary>
             <pre id="trace-output"></pre>

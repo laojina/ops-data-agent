@@ -48,8 +48,33 @@ button {
 
 #query-status {
     color: #4d5c66;
+    white-space: pre-line;
 }
 
+#query-result {
+    overflow-x: auto;
+    margin-bottom: 1rem;
+}
+
+#result-table {
+    border-collapse: collapse;
+    width: 100%;
+}
+
+#result-table caption {
+    text-align: left;
+    font-weight: 600;
+    margin-bottom: 0.5rem;
+}
+
+#result-table th,
+#result-table td {
+    border: 1px solid #c2cbd1;
+    padding: 0.5rem;
+    text-align: left;
+}
+
+#sql-output,
 #trace-output {
     white-space: pre-wrap;
     overflow-wrap: anywhere;

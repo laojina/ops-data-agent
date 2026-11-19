@@ -43,7 +43,7 @@ final class ModelClient {
             throw new IOException("缺少 LLM_API_KEY。请配置模型凭据后重启服务。");
         }
 
-        ObjectNode payload = mapper.createObjectNode().put("model", model).put("max_tokens", 512);
+        ObjectNode payload = mapper.createObjectNode().put("model", model).put("max_tokens", 1024);
         payload.set("messages", messages);
         payload.set("tools", tools);
         if ("api.deepseek.com".equalsIgnoreCase(endpoint.getHost())) {

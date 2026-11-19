@@ -7,8 +7,10 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 import java.net.InetSocketAddress;
+import java.nio.file.Path;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.function.IntFunction;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -17,6 +19,7 @@ import com.sun.net.httpserver.HttpServer;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
@@ -26,6 +29,10 @@ class ModelToolCallingTest {
     private final ObjectMapper mapper = new ObjectMapper();
     private final List<JsonNode> requests = new CopyOnWriteArrayList<>();
     private HttpServer server;
+    private volatile IntFunction<JsonNode> response = round -> completion(round == 1);
+
+    @TempDir
+    Path directory;
 
     @BeforeEach
     void startTestServer() throws Exception {
@@ -34,7 +41,7 @@ class ModelToolCallingTest {
         server.createContext("/v1/chat/completions", exchange -> {
             try (exchange) {
                 requests.add(mapper.readTree(exchange.getRequestBody()));
-                byte[] body = mapper.writeValueAsBytes(completion(requests.size() == 1));
+                byte[] body = mapper.writeValueAsBytes(response.apply(requests.size()));
                 exchange.sendResponseHeaders(200, body.length);
                 exchange.getResponseBody().write(body);
             }
@@ -88,11 +95,63 @@ class ModelToolCallingTest {
         System.out.println("PASS | Invalid input returns HTTP 400. Missing key gives an actionable error.");
     }
 
+    @Test
+    void passesSqliteErrorBackAndDisplaysOnlyTheActualQueryValue() throws Exception {
+        SeedDatabase.create(Path.of("seed.sql"), directory.resolve("ops.db"));
+        response = this::queryCompletion;
+        askEndpoint("test-credential").perform(post("/ask")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"session_id":"test","question":"出库票量是多少？"}
+                                """))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("answered"))
+                .andExpect(jsonPath("$.metric_id").value("M05"))
+                .andExpect(jsonPath("$.table.rows[0][0]").value(1200))
+                .andExpect(jsonPath("$.answer").value(org.hamcrest.Matchers.containsString("1200")));
+
+        assertEquals(4, requests.size());
+        JsonNode repairMessage = requests.get(2).path("messages").path(6);
+        assertEquals("bad-query", repairMessage.path("tool_call_id").asText());
+        assertTrue(mapper.readTree(repairMessage.path("content").asText())
+                .path("error").asText().contains("no such column"));
+        System.out.println("PASS | SQLite error returned to the model. The rewritten SQL result became the answer.");
+    }
+
+    private JsonNode queryCompletion(int round) {
+        ObjectNode result = (ObjectNode) completion(false);
+        ObjectNode message = (ObjectNode) result.at("/choices/0/message");
+        if (round == 4) {
+            message.put("content", "统计得到 999999 条记录。");
+            return result;
+        }
+        message.putNull("content");
+        var calls = message.putArray("tool_calls");
+        switch (round) {
+            case 1 -> {
+                addCall(calls, "metric-id", "lookup_metric", "{\"term\":\"出库票量\"}");
+                addCall(calls, "schema-id", "describe_table", "{\"name\":\"orders\"}");
+            }
+            case 2 -> addCall(calls, "bad-query", "run_sql",
+                    "{\"sql\":\"SELECT missing_column FROM orders LIMIT 1\"}");
+            case 3 -> addCall(calls, "fixed-query", "run_sql",
+                    "{\"sql\":\"SELECT count(*) AS order_count FROM orders LIMIT 1\"}");
+            default -> throw new IllegalArgumentException("Unexpected test round " + round);
+        }
+        return result;
+    }
+
+    private void addCall(com.fasterxml.jackson.databind.node.ArrayNode calls, String id, String name, String arguments) {
+        calls.addObject().put("id", id).put("type", "function").putObject("function")
+                .put("name", name).put("arguments", arguments);
+    }
+
     private MockMvc askEndpoint(String key) {
         String base = "http://127.0.0.1:" + server.getAddress().getPort() + "/v1";
         var model = new ModelClient(mapper, key, base, "test-model");
         return MockMvcBuilders.standaloneSetup(new AskController(new AskService(mapper, model,
-                new MetricDictionary(mapper)))).build();
+                new MetricDictionary(mapper), new ReadOnlyDatabase(directory.resolve("ops.db").toString()),
+                "执行带 LIMIT 的只读查询。"))).build();
     }
 
     private JsonNode completion(boolean first) {
