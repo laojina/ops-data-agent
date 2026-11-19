@@ -85,6 +85,18 @@
     "denominator": null,
     "time_field": "orders.shipped_at",
     "dimensions": ["仓库", "区域", "周", "月"],
-    "unit": "元"
+    "unit": "元",
+    "currency": "CNY"
+  },
+  {
+    "id": "M09",
+    "name": "破损金额率",
+    "aliases": ["运输破损金额率"],
+    "definition": "统计期内已出库订单对应的破损金额占已出库订单总金额的比例。",
+    "numerator": "范围内已出库订单关联的 type 为破损的 exceptions.amount 之和。",
+    "denominator": "范围内已出库订单的 orders.amount 之和，每个订单只计一次，包括无破损的订单。",
+    "time_field": "orders.shipped_at",
+    "dimensions": ["仓库", "区域", "周", "月"],
+    "unit": "比例"
   }
 ]
