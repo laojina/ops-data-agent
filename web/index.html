@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>经营数据问答 Agent</title>
+    <link rel="stylesheet" href="/styles.css">
+    <script src="/app.js" defer></script>
+</head>
+<body>
+    <main>
+        <h1>经营数据问答 Agent</h1>
+        <form id="query-form">
+            <label for="question">经营数据问题</label>
+            <textarea id="question" rows="3" required
+                      placeholder="例如：10 月华东区出库及时率是多少？"></textarea>
+            <button type="submit">提问</button>
+        </form>
+        <p id="query-status" role="status">接入 Agent 后即可查询。</p>
+    </main>
+</body>
+</html>

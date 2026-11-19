@@ -1,0 +1,90 @@
+[
+  {
+    "id": "M01",
+    "name": "出库及时率",
+    "aliases": ["及时率", "出库准时率"],
+    "definition": "在统计期内已出库的订单中，实际出库时间不晚于承诺出库时间的订单占比。",
+    "numerator": "orders.shipped_at 非空且不晚于 orders.promised_at 的订单数。",
+    "denominator": "orders.shipped_at 非空的订单数。",
+    "time_field": "orders.shipped_at",
+    "dimensions": ["仓库", "区域", "周", "月"],
+    "unit": "比例"
+  },
+  {
+    "id": "M02",
+    "name": "运输异常率",
+    "aliases": ["异常率", "订单异常率"],
+    "definition": "在统计期内创建的订单中，至少关联一条运输异常记录的订单占比。",
+    "numerator": "与 exceptions 按 order_id 关联后，有异常记录的去重订单数。",
+    "denominator": "统计范围内的全部订单数，包括没有异常记录的订单。",
+    "time_field": "orders.created_at",
+    "dimensions": ["仓库", "区域", "周", "月"],
+    "unit": "比例"
+  },
+  {
+    "id": "M03",
+    "name": "破损率",
+    "aliases": ["破损件数率"],
+    "definition": "统计期内出库订单对应的破损件数占出库件数的比例。",
+    "numerator": "范围内已出库订单关联的 type 为破损的异常记录的 exceptions.damaged_pieces 之和。",
+    "denominator": "范围内已出库订单的 orders.pieces 之和，每个订单只计一次。",
+    "time_field": "orders.shipped_at",
+    "dimensions": ["仓库", "区域", "周", "月"],
+    "unit": "比例"
+  },
+  {
+    "id": "M04",
+    "name": "履约达成率",
+    "aliases": ["签收达成率", "签收及时率"],
+    "definition": "统计期内到承诺签收日且未取消的订单中，在承诺日或之前签收的订单占比。",
+    "numerator": "应签收订单中 orders.signed_at 非空且其日期不晚于 orders.promised_delivery_at 日期的订单数。",
+    "denominator": "承诺签收日期落在统计期内且状态不为已取消的订单数，包含到期未签收订单。",
+    "time_field": "orders.promised_delivery_at",
+    "dimensions": ["仓库", "区域", "周", "月"],
+    "unit": "比例"
+  },
+  {
+    "id": "M05",
+    "name": "出库票量",
+    "aliases": ["出库单量", "出库订单数", "票量"],
+    "definition": "统计期内已出库的订单数。",
+    "numerator": "orders.shipped_at 非空的订单数。",
+    "denominator": null,
+    "time_field": "orders.shipped_at",
+    "dimensions": ["仓库", "区域", "周", "月"],
+    "unit": "订单"
+  },
+  {
+    "id": "M06",
+    "name": "延误订单率",
+    "aliases": ["运输延误率", "延误率"],
+    "definition": "在统计期内创建的订单中，至少关联一条延误异常记录的订单占比。",
+    "numerator": "关联至少一条 exceptions.type 为延误的去重订单数。",
+    "denominator": "统计范围内的全部订单数，包括没有异常记录的订单。",
+    "time_field": "orders.created_at",
+    "dimensions": ["仓库", "区域", "周", "月"],
+    "unit": "比例"
+  },
+  {
+    "id": "M07",
+    "name": "出库件量",
+    "aliases": ["出库件数"],
+    "definition": "统计期内已出库订单的总件数。",
+    "numerator": "orders.shipped_at 非空的订单的 orders.pieces 之和。",
+    "denominator": null,
+    "time_field": "orders.shipped_at",
+    "dimensions": ["仓库", "区域", "周", "月"],
+    "unit": "件"
+  },
+  {
+    "id": "M08",
+    "name": "出库金额",
+    "aliases": ["出库订单金额"],
+    "definition": "统计期内已出库订单的总金额。",
+    "numerator": "orders.shipped_at 非空的订单的 orders.amount 之和。",
+    "denominator": null,
+    "time_field": "orders.shipped_at",
+    "dimensions": ["仓库", "区域", "周", "月"],
+    "unit": "元"
+  }
+]

@@ -1,0 +1,51 @@
+:root {
+    color-scheme: light;
+    font-family: system-ui, "Microsoft YaHei", sans-serif;
+    color: #17232b;
+    background: #f7f9fa;
+}
+
+main {
+    max-width: 40rem;
+    margin: 10vh auto;
+    padding: 0 1.25rem;
+}
+
+h1 {
+    margin: 0 0 1.5rem;
+    font-size: clamp(1.5rem, 5vw, 2rem);
+}
+
+label {
+    display: block;
+    margin-bottom: 0.5rem;
+    font-weight: 600;
+}
+
+textarea {
+    display: block;
+    box-sizing: border-box;
+    width: 100%;
+    resize: vertical;
+    padding: 0.75rem;
+    border: 1px solid #8c9ba5;
+    border-radius: 0.375rem;
+    background: #fff;
+    font: inherit;
+    color: inherit;
+}
+
+button {
+    margin-top: 0.75rem;
+    padding: 0.5rem 1rem;
+    border: 0;
+    border-radius: 0.375rem;
+    color: #fff;
+    background: #16584f;
+    font: inherit;
+    cursor: pointer;
+}
+
+#query-status {
+    color: #4d5c66;
+}
