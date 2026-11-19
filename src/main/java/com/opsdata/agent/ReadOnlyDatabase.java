@@ -32,7 +32,7 @@ final class ReadOnlyDatabase {
     private static final List<String> TABLES = List.of("warehouses", "orders", "exceptions");
     private static final Map<String, String> PURPOSES = Map.of(
             "warehouses", "仓库名称和所属区域",
-            "orders", "订单及创建、承诺出库、实际出库、签收时间，金额和件数",
+            "orders", "订单、金额和件数。shipped_at 非空表示已经出库，已签收订单也可以有出库时间",
             "exceptions", "订单关联的运输异常记录，一个订单可以有多条异常");
     private static final Map<String, List<String>> ENUMS = Map.of(
             "warehouses", List.of("region"),

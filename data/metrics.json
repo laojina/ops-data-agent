@@ -27,7 +27,7 @@
     "aliases": ["破损件数率"],
     "definition": "统计期内出库订单对应的破损件数占出库件数的比例。",
     "numerator": "范围内已出库订单关联的 type 为破损的异常记录的 exceptions.damaged_pieces 之和。",
-    "denominator": "范围内已出库订单的 orders.pieces 之和，每个订单只计一次。",
+    "denominator": "统计范围内全部 shipped_at 非空订单的 orders.pieces 之和。已签收且有出库时间、无异常或无破损的订单都计入分母。每个订单只计一次。",
     "time_field": "orders.shipped_at",
     "dimensions": ["仓库", "区域", "周", "月"],
     "unit": "比例"
@@ -95,7 +95,7 @@
     "aliases": ["运输破损金额率"],
     "definition": "统计期内已出库订单对应的破损金额占已出库订单总金额的比例。",
     "numerator": "范围内已出库订单关联的 type 为破损的 exceptions.amount 之和。",
-    "denominator": "范围内已出库订单的 orders.amount 之和，每个订单只计一次，包括无破损的订单。",
+    "denominator": "范围内全部 shipped_at 非空订单的 orders.amount 之和，包括已签收和无破损的订单，每个订单只计一次。",
     "time_field": "orders.shipped_at",
     "dimensions": ["仓库", "区域", "周", "月"],
     "unit": "比例"

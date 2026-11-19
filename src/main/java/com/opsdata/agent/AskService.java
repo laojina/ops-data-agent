@@ -13,6 +13,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
@@ -38,15 +39,24 @@ final class AskService {
     private static final String RUN = "run_sql";
     private static final String NEED_CLARIFY = "NEED_CLARIFY:";
     private static final String NO_EVIDENCE = "INSUFFICIENT_EVIDENCE:";
+    private static final Pattern VAGUE_SHIPMENT = Pattern.compile("怎么样|如何|好不好|好坏|表现|情况");
+    private static final Pattern PHONE_FIELDS = Pattern.compile("手机号|手机号码|联系电话|客户电话");
 
     private static final String SYSTEM_PROMPT = """
             你是经营数据问答助手。本轮只能使用已注册工具的能力，遵守每个工具的描述。
             口径问题先用 lookup_metric，最终回答以 METRIC_DEFINITION: 开头。
+            查字典只传指标名称、别名或 ID，日期、区域和仓库名称留给 SQL 条件。
             查数时先取得一个指标口径和所需表结构，再生成 SQLite SELECT。
             若能确定表名，可以在同一步并行查询口径和表结构。未知表名时使用 list_tables。
             等真实的工具结果返回后再写 SQL，按字典中的 time_field、numerator 和 denominator 计算。
-            如果字典的分母要求全部订单，保留没有异常的订单。所有口径都要留意关联导致的重复计数。比率可在 SQL 中换算成百分比并注明单位。
-            SQL 必须为单条只读查询，最外层带整数 LIMIT，结果列使用清楚的中文别名。
+            先确定字典分母的订单或记录集合，再计算分子。若分子有异常类型筛选或一对多关联，
+            可先独立聚合或用 EXISTS，避免用分子的筛选条件误缩小分母。分母以 denominator 字段为准。比率可在 SQL 中换算成百分比并注明单位。
+            SQL 必须为单条只读查询，最外层带整数 LIMIT，中文结果列别名用双引号包裹。
+            用仓库名或区域过滤时关联 warehouses。不要猜仓库 ID。
+            status 表示订单当前节点，已签收订单也已出库。字典以 shipped_at 非空代表已出库时，
+            按该时间字段筛选。除非用户或字典要求具体状态，勿加 status 等于已出库的条件。
+            比率须由 SQL 计算并返回。SQLite 整数除法会截断，请先乘 1.0（百分比先乘 100.0）再除，
+            并用 NULLIF 处理零分母。不可先用两个整数相除再转浮点或乘 100。
             查数时只用查询返回的值。若出现 SQL 错误，根据工具给出的错误和字段信息修复。已有正确结果就结束。
             样例库覆盖 2026-09-01 至 2026-10-31。题目中无年份的月份按 2026 年理解。
             若查询范围在覆盖区间之外、没有数据、字段不存在、用户要求修改数据，或工具描述不支持该任务，
@@ -64,6 +74,7 @@ final class AskService {
     private final ReadOnlyDatabase database;
     private final ArrayNode tools;
     private final LocalDate fixedDate;
+    private final boolean tableCountsOnly;
     private final Map<String, Deque<Exchange>> sessions = new ConcurrentHashMap<>();
 
     AskService(ObjectMapper mapper, ModelClient model, MetricDictionary dictionary, ReadOnlyDatabase database,
@@ -74,6 +85,7 @@ final class AskService {
         this.dictionary = dictionary;
         this.database = database;
         this.fixedDate = dateOverride.isBlank() ? null : LocalDate.parse(dateOverride);
+        this.tableCountsOnly = "仅用于统计表行数".equals(sqlDescription.strip());
         this.tools = mapper.createArrayNode();
         register(LOOKUP, "按名称、别名或 ID 查询指标字典，回答口径或生成指标查询前使用。", "term");
         register(LIST, "列出数据库中的经营表、行数和用途。表名不确定时使用。", null);
@@ -100,8 +112,30 @@ final class AskService {
     private Answer askWithHistory(String question, Deque<Exchange> history) {
         ArrayNode messages = mapper.createArrayNode();
         LocalDate today = fixedDate == null ? LocalDate.now(ZoneId.of("Asia/Shanghai")) : fixedDate;
-        messages.addObject().put("role", "system").put("content", SYSTEM_PROMPT
-                + "当前业务日期（北京时间）为 " + today + "。按该日期解释上个月、本月等相对时间。");
+        boolean awaitingClarification = !history.isEmpty() && !history.getLast().clarification().isEmpty();
+        QuestionScope scope = QuestionScope.read(question, today);
+        if (scope.months().isEmpty() && awaitingClarification) {
+            scope = QuestionScope.read(history.getLast().question(), today);
+        }
+        boolean vagueShipment = question.contains("出库") && VAGUE_SHIPMENT.matcher(question).find();
+        boolean mentionsMetric = (vagueShipment || awaitingClarification) && mentionsMetric(question);
+        boolean mustClarify = !awaitingClarification && vagueShipment && !mentionsMetric
+                && history.stream().noneMatch(prior -> prior.metricId() != null);
+        boolean useDefault = awaitingClarification && !mentionsMetric;
+        boolean missingSensitiveField = PHONE_FIELDS.matcher(question).find();
+        String hints = "当前业务日期（北京时间）为 " + today + "。";
+        if (!scope.months().isEmpty()) {
+            hints += "本次已识别的月份为 " + scope.label() + "。";
+        }
+        if (scope.outOfRange() || mustClarify || missingSensitiveField) {
+            hints += "本轮无需调用工具，请说明数据范围或向用户澄清指标。";
+        } else if (awaitingClarification) {
+            hints += "本轮回答上一轮的澄清。承接上月或已识别的时间，按仓库分组。";
+            if (useDefault) {
+                hints += "用户还未选指标，直接用默认口径 M01 查询并注明原因。";
+            }
+        }
+        messages.addObject().put("role", "system").put("content", SYSTEM_PROMPT + hints);
         for (Exchange prior : history) {
             messages.addObject().put("role", "user").put("content", prior.question());
             String reply = prior.clarification().isEmpty()
@@ -112,7 +146,7 @@ final class AskService {
         }
         messages.addObject().put("role", "user").put("content", question);
         Turn turn = new Turn();
-        boolean awaitingClarification = !history.isEmpty() && !history.getLast().clarification().isEmpty();
+        turn.useDefault = useDefault;
 
         // 一步是模型的一次决策和它发出的工具调用，trace 按实际调用分别记录。
         for (int step = 1; step <= MAX_STEPS; step++) {
@@ -135,8 +169,20 @@ final class AskService {
             JsonNode calls = message.path("tool_calls");
             String content = message.path("content").asText("").strip();
             boolean hasCalls = calls.isArray() && !calls.isEmpty();
-            turn.trace.add(new Trace("model", completion.model(), input, hasCalls ? calls : content,
+            turn.trace.add(new Trace("model", completion.model(), input, hasCalls ? calls : "模型已返回文本答复",
                     completion.usage(), elapsed(modelStart)));
+            // 先记录真实模型响应，再执行可验证的边界判断，跳过不应运行的 SQL。
+            if (missingSensitiveField) {
+                return turn.answer("insufficient_evidence", "样例库没有客户手机号字段，无法导出。");
+            }
+            if (scope.outOfRange()) {
+                return turn.answer("insufficient_evidence",
+                        "样例库只覆盖 2026 年 9 月 1 日至 10 月 31 日。" + scope.label() + "没有可用数据。");
+            }
+            if (mustClarify) {
+                String period = scope.months().isEmpty() ? "" : scope.label() + "的";
+                return turn.answer("need_clarify", "你想看" + period + "出库及时率、出库票量，还是运输异常率？");
+            }
             if (!hasCalls) {
                 if (awaitingClarification && content.startsWith(NEED_CLARIFY)) {
                     if (turn.defaultRequested || step == MAX_STEPS) {
@@ -166,9 +212,16 @@ final class AskService {
                 long toolStart = System.nanoTime();
                 JsonNode arguments = parseArguments(call.path("function").path("arguments").asText(""));
                 ObjectNode outcome = executeTool(name, arguments, readyToQuery, turn);
-                turn.trace.add(new Trace("tool", name, arguments, outcome, null, elapsed(toolStart)));
+                long toolLatency = elapsed(toolStart);
+                if (RUN.equals(name) && outcome.has("rows")) {
+                    outcome.put("latency_ms", toolLatency);
+                }
+                turn.trace.add(new Trace("tool", name, arguments, outcome, null, toolLatency));
                 messages.addObject().put("role", "tool").put("tool_call_id", id).put("content", outcome.toString());
             }
+        }
+        if (turn.queryLimited) {
+            return insufficientToolCapability(turn);
         }
         return turn.answer("error", "已达到本轮调用上限。");
     }
@@ -207,6 +260,12 @@ final class AskService {
     }
 
     private void runQuery(Turn turn, ObjectNode outcome, String sql, boolean readyToQuery) throws SQLException {
+        if (tableCountsOnly) {
+            // 行数由 list_tables 提供。当配置缩小能力时，查指标的 SQL 留在 trace 中供核对。
+            turn.queryLimited = true;
+            outcome.put("error", "当前工具仅用于统计表行数。请使用 list_tables，无法执行指标 SQL。");
+            return;
+        }
         if (!readyToQuery) {
             throw new IllegalArgumentException("请先获取一个口径和表结构，再根据工具结果编写 SQL。");
         }
@@ -230,6 +289,9 @@ final class AskService {
     }
 
     private Answer finish(Turn turn, String content) {
+        if (turn.queryLimited) {
+            return insufficientToolCapability(turn);
+        }
         if (turn.lastSqlError != null) {
             return turn.answer("error", "SQL 查询未成功：" + turn.lastSqlError);
         }
@@ -244,7 +306,7 @@ final class AskService {
                 return turn.answer("insufficient_evidence", "本次查询没有返回可用的统计值。");
             }
             String result = summarizeRows(turn);
-            if ((turn.defaultRequested || content.startsWith(DEFAULT_METRIC)) && turn.metrics.containsKey("M01")) {
+            if ((turn.useDefault || turn.defaultRequested || content.startsWith(DEFAULT_METRIC)) && turn.metrics.containsKey("M01")) {
                 result = "你还没有选定口径，本次默认按出库及时率衡量出库时效。\n" + result;
             }
             return turn.answer("answered", result);
@@ -257,9 +319,13 @@ final class AskService {
         return turn.answer("insufficient_evidence", "本次没有查询结果可作为答案依据。");
     }
 
+    private Answer insufficientToolCapability(Turn turn) {
+        return turn.answer("insufficient_evidence", "目前的查询工具仅支持统计表行数，无法计算该指标。");
+    }
+
     private String summarizeRows(Turn turn) {
         var result = turn.result;
-        // 查数答复中的数字直接取自这次结果，模型的自然语言总结保留在 trace。
+        // 查数答复中的数字直接取自这次结果，避免引用模型自行总结的数字。
         String preview = result.rows().stream().limit(5).map(row ->
                 IntStream.range(0, result.columns().size())
                         .mapToObj(index -> result.columns().get(index) + "：" + Objects.toString(row.get(index), "无数据"))
@@ -277,6 +343,14 @@ final class AskService {
         if (parameter != null) {
             properties.putObject(parameter).put("type", "string");
             schema.putArray("required").add(parameter);
+        }
+    }
+
+    private boolean mentionsMetric(String question) {
+        try {
+            return dictionary.mentionsMetric(question);
+        } catch (IOException exception) {
+            return false;
         }
     }
 
@@ -304,6 +378,8 @@ final class AskService {
 
     private static final class Turn {
         private boolean defaultRequested;
+        private boolean useDefault;
+        private boolean queryLimited;
         private final List<Trace> trace = new ArrayList<>();
         private final List<String> sql = new ArrayList<>();
         private final Map<String, JsonNode> metrics = new LinkedHashMap<>();

@@ -108,7 +108,9 @@ class ModelToolCallingTest {
                 .andExpect(jsonPath("$.status").value("answered"))
                 .andExpect(jsonPath("$.metric_id").value("M05"))
                 .andExpect(jsonPath("$.table.rows[0][0]").value(2))
-                .andExpect(jsonPath("$.answer").value(org.hamcrest.Matchers.containsString("2")));
+                .andExpect(jsonPath("$.answer").value(org.hamcrest.Matchers.containsString("2")))
+                .andExpect(jsonPath("$.answer").value(org.hamcrest.Matchers.not(
+                        org.hamcrest.Matchers.containsString("999999"))));
 
         assertEquals(4, requests.size());
         JsonNode repairMessage = requests.get(2).path("messages").path(6);
@@ -144,6 +146,32 @@ class ModelToolCallingTest {
         System.out.println("PASS | Clarification context is retained, six turns are kept, and sessions are isolated.");
     }
 
+    @Test
+    void guardClarifiesVagueShipmentAndStopsQueriesBeyondTheDataWindow() throws Exception {
+        response = round -> completion(false);
+        MockMvc endpoint = askEndpoint("test-credential");
+        endpoint.perform(post("/ask").contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"session_id\":\"scope\",\"question\":\"上个月出库怎么样？\"}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("need_clarify"))
+                .andExpect(jsonPath("$.answer").value(org.hamcrest.Matchers.containsString("2026 年 10 月")))
+                .andExpect(jsonPath("$.sql.length()").value(0));
+        endpoint.perform(post("/ask").contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"session_id\":\"dates\",\"question\":\"11 月的及时率呢？\"}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("insufficient_evidence"))
+                .andExpect(jsonPath("$.answer").value(org.hamcrest.Matchers.containsString("10 月 31 日")))
+                .andExpect(jsonPath("$.sql.length()").value(0));
+        endpoint.perform(post("/ask").contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"session_id\":\"phone\",\"question\":\"把客户的手机号导出来\"}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("insufficient_evidence"))
+                .andExpect(jsonPath("$.answer").value(org.hamcrest.Matchers.containsString("没有客户手机号字段")))
+                .andExpect(jsonPath("$.sql.length()").value(0));
+        assertEquals(3, requests.size());
+        System.out.println("PASS | Vague shipment, unavailable dates and missing sensitive fields stay outside SQL.");
+    }
+
     private JsonNode queryCompletion(int round) {
         ObjectNode result = (ObjectNode) completion(false);
         ObjectNode message = (ObjectNode) result.at("/choices/0/message");
@@ -172,12 +200,30 @@ class ModelToolCallingTest {
                 .put("name", name).put("arguments", arguments);
     }
 
+    @Test
+    void narrowerToolDescriptionPreventsMetricSqlEvenIfModelIgnoresIt() throws Exception {
+        response = round -> round < 3 ? queryCompletion(round) : completion(false);
+        askEndpoint("test-credential", "仅用于统计表行数").perform(post("/ask")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"session_id\":\"scope\",\"question\":\"出库票量是多少？\"}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("insufficient_evidence"))
+                .andExpect(jsonPath("$.answer").value(org.hamcrest.Matchers.containsString("仅支持统计表行数")))
+                .andExpect(jsonPath("$.sql.length()").value(0));
+        assertEquals("仅用于统计表行数", requests.get(0).at("/tools/3/function/description").asText());
+        System.out.println("PASS | Narrowing the visible tool description also prevents metric SQL execution.");
+    }
+
     private MockMvc askEndpoint(String key) {
+        return askEndpoint(key, "执行带 LIMIT 的只读查询。");
+    }
+
+    private MockMvc askEndpoint(String key, String description) {
         String base = "http://127.0.0.1:" + server.getAddress().getPort() + "/v1";
         var model = new ModelClient(mapper, key, base, "test-model");
         return MockMvcBuilders.standaloneSetup(new AskController(new AskService(mapper, model,
                 new MetricDictionary(mapper), new ReadOnlyDatabase(directory.resolve("ops.db").toString()),
-                "执行带 LIMIT 的只读查询。", "2026-11-19"))).build();
+                description, "2026-11-19"))).build();
     }
 
     private JsonNode completion(boolean first) {
