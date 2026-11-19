@@ -42,6 +42,7 @@ class SeedDataTest {
                     FROM orders WHERE order_id = 'FIX-CROSS'
                     """));
         }
+        System.out.println("PASS | Sample database: 3 warehouses, 1200 orders, 180 exceptions. Foreign keys and dates verified.");
     }
 
     @Test
@@ -73,6 +74,7 @@ class SeedDataTest {
                     WHERE order_id LIKE 'FIX-SEP-%' AND shipped_at IS NOT NULL
                     """));
         }
+        System.out.println("PASS | Three-order fixture: M01 = 1/2, M02 = 1/3, M03 = 1/10, M04 = 1/3.");
     }
 
     @Test
@@ -87,6 +89,7 @@ class SeedDataTest {
         try (Connection connection = open(database)) {
             assertEquals("1200", scalar(connection, "SELECT count(*) FROM orders"));
         }
+        System.out.println("PASS | A failed rebuild preserves the existing database.");
     }
 
     @Test
@@ -97,6 +100,7 @@ class SeedDataTest {
         assertEquals(List.of("出库及时率", "运输异常率", "破损率", "履约达成率",
                         "出库票量", "延误订单率", "出库件量", "出库金额"),
                 metrics.findValuesAsText("name"));
+        System.out.println("PASS | Metric dictionary: all 8 metric IDs and names match.");
     }
 
     private static Connection open(Path database) throws Exception {
