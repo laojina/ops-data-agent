@@ -27,7 +27,7 @@ class ReadOnlyDatabaseTest {
 
     @Test
     void describesTheActualWarehouseSchemaAndCapsTheResult() throws Exception {
-        assertEquals(List.of(3L, 1200L, 180L),
+        assertEquals(List.of(4L, 1203L, 182L),
                 database.listTables().stream().map(ReadOnlyDatabase.TableInfo::rows).toList());
         assertTrue(database.describe("warehouses").columns().stream().anyMatch(column ->
                 column.name().equals("region") && column.values().contains("华东")));

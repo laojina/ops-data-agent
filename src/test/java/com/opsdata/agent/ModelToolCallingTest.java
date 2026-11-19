@@ -107,8 +107,8 @@ class ModelToolCallingTest {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.status").value("answered"))
                 .andExpect(jsonPath("$.metric_id").value("M05"))
-                .andExpect(jsonPath("$.table.rows[0][0]").value(1200))
-                .andExpect(jsonPath("$.answer").value(org.hamcrest.Matchers.containsString("1200")));
+                .andExpect(jsonPath("$.table.rows[0][0]").value(2))
+                .andExpect(jsonPath("$.answer").value(org.hamcrest.Matchers.containsString("2")));
 
         assertEquals(4, requests.size());
         JsonNode repairMessage = requests.get(2).path("messages").path(6);
@@ -161,7 +161,7 @@ class ModelToolCallingTest {
             case 2 -> addCall(calls, "bad-query", "run_sql",
                     "{\"sql\":\"SELECT missing_column FROM orders LIMIT 1\"}");
             case 3 -> addCall(calls, "fixed-query", "run_sql",
-                    "{\"sql\":\"SELECT count(*) AS order_count FROM orders LIMIT 1\"}");
+                    "{\"sql\":\"SELECT count(*) AS order_count FROM orders WHERE order_id LIKE 'FIX-SEP-%' AND shipped_at IS NOT NULL LIMIT 1\"}");
             default -> throw new IllegalArgumentException("Unexpected test round " + round);
         }
         return result;

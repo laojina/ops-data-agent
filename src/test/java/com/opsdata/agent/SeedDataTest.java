@@ -31,9 +31,9 @@ class SeedDataTest {
         SeedDatabase.create(SEED_SCRIPT, database);
 
         try (Connection connection = open(database)) {
-            assertEquals("3", scalar(connection, "SELECT count(*) FROM warehouses"));
-            assertEquals("1200", scalar(connection, "SELECT count(*) FROM orders"));
-            assertEquals("180", scalar(connection, "SELECT count(*) FROM exceptions"));
+            assertEquals("4", scalar(connection, "SELECT count(*) FROM warehouses"));
+            assertEquals("1203", scalar(connection, "SELECT count(*) FROM orders"));
+            assertEquals("182", scalar(connection, "SELECT count(*) FROM exceptions"));
             assertEquals("0", scalar(connection, "SELECT count(*) FROM pragma_foreign_key_check"));
             assertEquals("2026-09-01", scalar(connection, "SELECT date(min(created_at)) FROM orders"));
             assertEquals("2026-10-31", scalar(connection, "SELECT date(max(created_at)) FROM orders"));
@@ -42,7 +42,7 @@ class SeedDataTest {
                     FROM orders WHERE order_id = 'FIX-CROSS'
                     """));
         }
-        System.out.println("PASS | Sample database: 3 warehouses, 1200 orders, 180 exceptions. Foreign keys and dates verified.");
+        System.out.println("PASS | Sample database: 4 warehouses, 1203 orders, 182 exceptions. Foreign keys and dates verified.");
     }
 
     @Test
@@ -87,20 +87,20 @@ class SeedDataTest {
         assertThrows(ScriptException.class, () -> SeedDatabase.create(invalidScript, database));
 
         try (Connection connection = open(database)) {
-            assertEquals("1200", scalar(connection, "SELECT count(*) FROM orders"));
+            assertEquals("1203", scalar(connection, "SELECT count(*) FROM orders"));
         }
         System.out.println("PASS | A failed rebuild preserves the existing database.");
     }
 
     @Test
-    void baseDictionaryContainsEightUniqueMetricIdsAndExactNames() throws Exception {
+    void dictionaryContainsNineUniqueMetricIdsAndExactNames() throws Exception {
         JsonNode metrics = new ObjectMapper().readTree(Path.of("data", "metrics.json").toFile());
-        assertEquals(List.of("M01", "M02", "M03", "M04", "M05", "M06", "M07", "M08"),
+        assertEquals(List.of("M01", "M02", "M03", "M04", "M05", "M06", "M07", "M08", "M09"),
                 metrics.findValuesAsText("id"));
         assertEquals(List.of("出库及时率", "运输异常率", "破损率", "履约达成率",
-                        "出库票量", "延误订单率", "出库件量", "出库金额"),
+                        "出库票量", "延误订单率", "出库件量", "出库金额", "破损金额率"),
                 metrics.findValuesAsText("name"));
-        System.out.println("PASS | Metric dictionary: all 8 metric IDs and names match.");
+        System.out.println("PASS | Metric dictionary: all 9 metric IDs and names match.");
     }
 
     private static Connection open(Path database) throws Exception {
