@@ -2,11 +2,16 @@ package com.opsdata.agent;
 
 import java.io.IOException;
 import java.sql.SQLException;
+import java.time.LocalDate;
+import java.time.ZoneId;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Deque;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
@@ -25,6 +30,8 @@ final class AskService {
 
     private static final int MAX_STEPS = 6;
     private static final int MAX_SQL_ATTEMPTS = 3;
+    private static final int MAX_HISTORY = 6;
+    private static final String DEFAULT_METRIC = "DEFAULT_METRIC:";
     private static final String LOOKUP = "lookup_metric";
     private static final String LIST = "list_tables";
     private static final String DESCRIBE = "describe_table";
@@ -34,16 +41,21 @@ final class AskService {
 
     private static final String SYSTEM_PROMPT = """
             你是经营数据问答助手。本轮只能使用已注册工具的能力，遵守每个工具的描述。
-            口径问题先用 lookup_metric。查数时先取得一个指标口径和所需表结构，再生成 SQLite SELECT。
+            口径问题先用 lookup_metric，最终回答以 METRIC_DEFINITION: 开头。
+            查数时先取得一个指标口径和所需表结构，再生成 SQLite SELECT。
             若能确定表名，可以在同一步并行查询口径和表结构。未知表名时使用 list_tables。
             等真实的工具结果返回后再写 SQL，按字典中的 time_field、numerator 和 denominator 计算。
-            保留分母中的零异常记录和应计订单，留意连接导致重复计数。比率可在 SQL 中换算成百分比并注明单位。
+            如果字典的分母要求全部订单，保留没有异常的订单。所有口径都要留意关联导致的重复计数。比率可在 SQL 中换算成百分比并注明单位。
             SQL 必须为单条只读查询，最外层带整数 LIMIT，结果列使用清楚的中文别名。
             查数时只用查询返回的值。若出现 SQL 错误，根据工具给出的错误和字段信息修复。已有正确结果就结束。
             样例库覆盖 2026-09-01 至 2026-10-31。题目中无年份的月份按 2026 年理解。
             若查询范围在覆盖区间之外、没有数据、字段不存在、用户要求修改数据，或工具描述不支持该任务，
             用 INSUFFICIENT_EVIDENCE: 开头并说明原因，不输出估算值。
-            若用户未说清要查的指标或必要条件，用 NEED_CLARIFY: 开头并提出一个简短问题。
+            上文仅用于理解指标、时间和筛选条件。追问只改变明确提到的条件，继承其他条件并重新查询。
+            若指标不明确，且上一轮未澄清，用 NEED_CLARIFY: 开头。反问时复述已经识别的时间范围，
+            对出库问题给出出库及时率、出库票量、运输异常率三个选项。不要追问已知条件。
+            若上一轮已经澄清，要保留时间等条件并执行。仍未选定指标时默认 M01（出库及时率），
+            先从字典取口径，完成查询后以 DEFAULT_METRIC: 开头并解释。澄清后未指定仓库或区域时按仓库分组。
             """;
 
     private final ObjectMapper mapper;
@@ -51,13 +63,17 @@ final class AskService {
     private final MetricDictionary dictionary;
     private final ReadOnlyDatabase database;
     private final ArrayNode tools;
+    private final LocalDate fixedDate;
+    private final Map<String, Deque<Exchange>> sessions = new ConcurrentHashMap<>();
 
     AskService(ObjectMapper mapper, ModelClient model, MetricDictionary dictionary, ReadOnlyDatabase database,
-               @Value("${agent.tools.run-sql-description:根据已读取的表结构和指标字典执行一条带 LIMIT 的只读 SQLite 查询。返回列名、最多 200 行及是否截断。}") String sqlDescription) {
+               @Value("${agent.tools.run-sql-description:根据已读取的表结构和指标字典执行一条带 LIMIT 的只读 SQLite 查询。返回列名、最多 200 行及是否截断。}") String sqlDescription,
+               @Value("${agent.today:}") String dateOverride) {
         this.mapper = mapper;
         this.model = model;
         this.dictionary = dictionary;
         this.database = database;
+        this.fixedDate = dateOverride.isBlank() ? null : LocalDate.parse(dateOverride);
         this.tools = mapper.createArrayNode();
         register(LOOKUP, "按名称、别名或 ID 查询指标字典，回答口径或生成指标查询前使用。", "term");
         register(LIST, "列出数据库中的经营表、行数和用途。表名不确定时使用。", null);
@@ -65,11 +81,38 @@ final class AskService {
         register(RUN, sqlDescription, "sql");
     }
 
-    Answer ask(String question) {
+    Answer ask(String sessionId, String question) {
+        Deque<Exchange> history = sessions.computeIfAbsent(sessionId, ignored -> new ArrayDeque<>());
+        // 同一会话的两个请求顺序处理，其他会话可独立执行。
+        synchronized (history) {
+            Answer answer = askWithHistory(question, history);
+            if (!"error".equals(answer.status())) {
+                if (history.size() == MAX_HISTORY) {
+                    history.removeFirst();
+                }
+                String clarification = "need_clarify".equals(answer.status()) ? answer.answer() : "";
+                history.addLast(new Exchange(question, answer.metricId(), clarification));
+            }
+            return answer;
+        }
+    }
+
+    private Answer askWithHistory(String question, Deque<Exchange> history) {
         ArrayNode messages = mapper.createArrayNode();
-        messages.addObject().put("role", "system").put("content", SYSTEM_PROMPT);
+        LocalDate today = fixedDate == null ? LocalDate.now(ZoneId.of("Asia/Shanghai")) : fixedDate;
+        messages.addObject().put("role", "system").put("content", SYSTEM_PROMPT
+                + "当前业务日期（北京时间）为 " + today + "。按该日期解释上个月、本月等相对时间。");
+        for (Exchange prior : history) {
+            messages.addObject().put("role", "user").put("content", prior.question());
+            String reply = prior.clarification().isEmpty()
+                    ? "上一轮指标 ID：" + Objects.toString(prior.metricId(), "未确定")
+                    : prior.clarification();
+            // 保留提问和口径标识，避免把上次结果里的数字作为本轮依据。
+            messages.addObject().put("role", "assistant").put("content", reply);
+        }
         messages.addObject().put("role", "user").put("content", question);
         Turn turn = new Turn();
+        boolean awaitingClarification = !history.isEmpty() && !history.getLast().clarification().isEmpty();
 
         // 一步是模型的一次决策和它发出的工具调用，trace 按实际调用分别记录。
         for (int step = 1; step <= MAX_STEPS; step++) {
@@ -95,6 +138,16 @@ final class AskService {
             turn.trace.add(new Trace("model", completion.model(), input, hasCalls ? calls : content,
                     completion.usage(), elapsed(modelStart)));
             if (!hasCalls) {
+                if (awaitingClarification && content.startsWith(NEED_CLARIFY)) {
+                    if (turn.defaultRequested || step == MAX_STEPS) {
+                        return turn.answer("insufficient_evidence", "已选择默认口径出库及时率，当前条件不足以完成查询。");
+                    }
+                    turn.defaultRequested = true;
+                    messages.add(message);
+                    messages.addObject().put("role", "system").put("content",
+                            "本轮已用过一次澄清。保留上文时间和条件，按默认口径 M01（出库及时率）继续查询。");
+                    continue;
+                }
                 return finish(turn, content);
             }
             if (step == MAX_STEPS || calls.size() > tools.size()) {
@@ -102,7 +155,7 @@ final class AskService {
             }
 
             // 同一批调用中的口径和表结构要先回传给模型，它在下一步才可以生成查询。
-            boolean readyToQuery = turn.metricIds.size() == 1 && turn.schemaRead;
+            boolean readyToQuery = turn.metrics.size() == 1 && turn.schemaRead;
             messages.add(message);
             for (JsonNode call : calls) {
                 String id = call.path("id").asText("");
@@ -131,7 +184,7 @@ final class AskService {
                     JsonNode metric = dictionary.lookup(requiredText(arguments, "term")).orElse(null);
                     outcome.set("metric", metric);
                     if (metric != null) {
-                        turn.metricIds.put(metric.path("id").asText(), metric.path("name").asText());
+                        turn.metrics.put(metric.path("id").asText(), metric);
                     }
                 }
                 case LIST -> outcome.set("tables", mapper.valueToTree(database.listTables()));
@@ -190,15 +243,18 @@ final class AskService {
             if (turn.result.rows().stream().flatMap(List::stream).noneMatch(Objects::nonNull)) {
                 return turn.answer("insufficient_evidence", "本次查询没有返回可用的统计值。");
             }
-            return turn.answer("answered", summarizeRows(turn));
+            String result = summarizeRows(turn);
+            if ((turn.defaultRequested || content.startsWith(DEFAULT_METRIC)) && turn.metrics.containsKey("M01")) {
+                result = "你还没有选定口径，本次默认按出库及时率衡量出库时效。\n" + result;
+            }
+            return turn.answer("answered", result);
         }
-        if (turn.metricIds.isEmpty()) {
-            return turn.answer("insufficient_evidence", "本次没有从工具获得可用的指标依据。");
+        if (content.startsWith("METRIC_DEFINITION:") && turn.metrics.size() == 1) {
+            JsonNode metric = turn.metrics.values().iterator().next();
+            return turn.answer("answered", metric.path("definition").asText() + "\n分子：" + metric.path("numerator").asText()
+                    + "\n分母：" + metric.path("denominator").asText("无"));
         }
-        if (content.isBlank()) {
-            return turn.answer("error", "模型没有返回可展示的答复。");
-        }
-        return turn.answer("answered", content);
+        return turn.answer("insufficient_evidence", "本次没有查询结果可作为答案依据。");
     }
 
     private String summarizeRows(Turn turn) {
@@ -209,7 +265,7 @@ final class AskService {
                         .mapToObj(index -> result.columns().get(index) + "：" + Objects.toString(row.get(index), "无数据"))
                         .collect(Collectors.joining("，")))
                 .collect(Collectors.joining("\n"));
-        String name = turn.metricIds.values().iterator().next();
+        String name = turn.metrics.values().iterator().next().path("name").asText();
         return name + "查询结果\n" + preview + (result.rows().size() > 5 ? "\n完整返回值见下方表格。" : "");
     }
 
@@ -244,17 +300,20 @@ final class AskService {
         return TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
     }
 
+    private record Exchange(String question, String metricId, String clarification) {}
+
     private static final class Turn {
+        private boolean defaultRequested;
         private final List<Trace> trace = new ArrayList<>();
         private final List<String> sql = new ArrayList<>();
-        private final Map<String, String> metricIds = new LinkedHashMap<>();
+        private final Map<String, JsonNode> metrics = new LinkedHashMap<>();
         private boolean schemaRead;
         private int attempts;
         private String lastSqlError;
         private ReadOnlyDatabase.QueryResult result;
 
         private Answer answer(String status, String content) {
-            String metricId = metricIds.size() == 1 ? metricIds.keySet().iterator().next() : null;
+            String metricId = metrics.size() == 1 ? metrics.keySet().iterator().next() : null;
             Table table = result == null || !"answered".equals(status)
                     ? new Table(List.of(), List.of(), false)
                     : new Table(result.columns(), result.rows(), result.truncated());

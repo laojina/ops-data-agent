@@ -24,6 +24,6 @@ final class AskController {
                 || !question.isTextual() || question.textValue().isBlank()) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "session_id 和 question 必须是非空字符串。");
         }
-        return service.ask(question.textValue().strip());
+        return service.ask(sessionId.textValue().strip(), question.textValue().strip());
     }
 }

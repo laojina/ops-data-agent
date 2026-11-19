@@ -118,6 +118,32 @@ class ModelToolCallingTest {
         System.out.println("PASS | SQLite error returned to the model. The rewritten SQL result became the answer.");
     }
 
+    @Test
+    void keepsSixTurnsAndSeparatesSessions() throws Exception {
+        response = round -> {
+            ObjectNode result = (ObjectNode) completion(false);
+            ((ObjectNode) result.at("/choices/0/message")).put("content", round == 1
+                    ? "NEED_CLARIFY: 2026 年 10 月想看及时率、票量还是异常率？"
+                    : "INSUFFICIENT_EVIDENCE: 暂无查询结果。");
+            return result;
+        };
+        MockMvc endpoint = askEndpoint("test-credential");
+        for (int i = 0; i < 8; i++) {
+            endpoint.perform(post("/ask").contentType(MediaType.APPLICATION_JSON)
+                    .content("{\"session_id\":\"first\",\"question\":\"question-" + i + "\"}"))
+                    .andExpect(status().isOk());
+        }
+        JsonNode afterClarification = requests.get(1).path("messages");
+        assertTrue(afterClarification.toString().contains("2026 年 10 月想看及时率"));
+        assertEquals(14, requests.get(7).path("messages").size());
+        assertTrue(!requests.get(7).path("messages").toString().contains("question-0"));
+        endpoint.perform(post("/ask").contentType(MediaType.APPLICATION_JSON)
+                .content("{\"session_id\":\"another\",\"question\":\"different session\"}"))
+                .andExpect(status().isOk());
+        assertEquals(2, requests.get(8).path("messages").size());
+        System.out.println("PASS | Clarification context is retained, six turns are kept, and sessions are isolated.");
+    }
+
     private JsonNode queryCompletion(int round) {
         ObjectNode result = (ObjectNode) completion(false);
         ObjectNode message = (ObjectNode) result.at("/choices/0/message");
@@ -151,7 +177,7 @@ class ModelToolCallingTest {
         var model = new ModelClient(mapper, key, base, "test-model");
         return MockMvcBuilders.standaloneSetup(new AskController(new AskService(mapper, model,
                 new MetricDictionary(mapper), new ReadOnlyDatabase(directory.resolve("ops.db").toString()),
-                "执行带 LIMIT 的只读查询。"))).build();
+                "执行带 LIMIT 的只读查询。", "2026-11-19"))).build();
     }
 
     private JsonNode completion(boolean first) {
@@ -166,7 +192,7 @@ class ModelToolCallingTest {
                     .putObject("function").put("name", "lookup_metric")
                     .put("arguments", "{\"term\":\"异常率\"}");
         } else {
-            message.put("content", "分母是统计范围内的全部订单数。");
+            message.put("content", "METRIC_DEFINITION: 分母是统计范围内的全部订单数。");
         }
         return response;
     }
