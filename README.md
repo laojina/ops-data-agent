@@ -30,6 +30,39 @@ Invoke-RestMethod -Method Post -Uri 'http://localhost:8000/ask' -ContentType 'ap
 展开「查看调用记录」，可以看到模型生成的工具请求、Java 从 `data/metrics.json` 命中的 M02、模型最终答复。两次模型调用的 token 来自接口实际返回的 `usage`。工具记录包含输入、命中口径和耗时。删除所使用的 Key 并重启后，`/ask` 会返回 `status: error`。
 
 
+### 真实调用验收
+
+实测问题为「运输异常率怎么算？」。模型发起 `lookup_metric`，Java 按原工具调用 ID 回传 M02，模型给出运输异常率的分子和分母。以下为实测响应节选，token 取自 DeepSeek 返回的用量。
+
+```json
+{
+  "status": "answered",
+  "metric_id": "M02",
+  "trace": [
+    {
+      "type": "model",
+      "name": "deepseek-flash",
+      "tokens": {"prompt_tokens": 372, "completion_tokens": 41, "total_tokens": 413},
+      "latency_ms": 1124
+    },
+    {
+      "type": "tool",
+      "name": "lookup_metric",
+      "outcome": {"metric": {"id": "M02"}},
+      "tokens": null,
+      "latency_ms": 9
+    },
+    {
+      "type": "model",
+      "name": "deepseek-flash",
+      "tokens": {"prompt_tokens": 533, "completion_tokens": 108, "total_tokens": 641},
+      "latency_ms": 953
+    }
+  ]
+}
+```
+
+
 ## 查看 SQLite 数据
 
 第一条命令将数据库文件生成在项目根目录的 `data/ops.db`。在支持 SQLite 的 Navicat 中，新建 SQLite 连接，类型选择「现有数据库文件」，选中该文件并连接。展开左侧「表」，双击 `warehouses`、`orders` 或 `exceptions` 查看数据。在 Windows 上重新建库前可以先关闭该连接，避免文件被占用。
