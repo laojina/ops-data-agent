@@ -177,7 +177,7 @@ class ModelToolCallingTest {
         SeedDatabase.create(Path.of("seed.sql"), directory.resolve("ops.db"));
         response = this::queryCompletion;
         MockMvc endpoint = askEndpoint("test-credential");
-        for (String date : List.of("11/2", "2026-11-02", "2026/11/02", "2026年11月2日", "11月2号")) {
+        for (String date : List.of("11/2", "11-02", "2026-11-02", "2026/11/02", "2026年11月2日", "11月2号")) {
             requests.clear();
             endpoint.perform(post("/ask").contentType(MediaType.APPLICATION_JSON)
                             .content(mapper.createObjectNode().put("session_id", date)
@@ -188,7 +188,7 @@ class ModelToolCallingTest {
                     .andExpect(jsonPath("$.sql.length()").value(0));
             assertEquals(1, requests.size());
         }
-        for (String date : List.of("10/31", "2026-10-31")) {
+        for (String date : List.of("10/31", "10-31", "2026-10-31")) {
             requests.clear();
             endpoint.perform(post("/ask").contentType(MediaType.APPLICATION_JSON)
                             .content(mapper.createObjectNode().put("session_id", date)
@@ -197,6 +197,100 @@ class ModelToolCallingTest {
                     .andExpect(jsonPath("$.status").value("answered"));
             assertTrue(requests.get(0).at("/messages/0/content").asText().contains("2026 年 10 月 31 日"));
         }
+    }
+
+    @Test
+    void refusesLastWeekWhenItFallsOutsideTheObservedPeriod() throws Exception {
+        SeedDatabase.create(Path.of("seed.sql"), directory.resolve("ops.db"));
+        response = this::queryCompletion;
+        askEndpoint("test-credential").perform(post("/ask").contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"session_id":"last-week","question":"上周的履约达成率是多少？"}
+                                """))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("insufficient_evidence"))
+                .andExpect(jsonPath("$.answer").value(org.hamcrest.Matchers.containsString(
+                        "2026 年 11 月 9 日 至 2026 年 11 月 15 日没有可用数据")))
+                .andExpect(jsonPath("$.sql.length()").value(0));
+        assertEquals(1, requests.size());
+    }
+
+    @Test
+    void weeklyFollowupAsksTheModelToRecombineAWeekSplitByMonth() throws Exception {
+        SeedDatabase.create(Path.of("seed.sql"), directory.resolve("ops.db"));
+        String weeklySql = """
+                WITH south_orders AS (
+                    SELECT date(o.created_at, 'weekday 0', '-6 days') AS "周起始日",
+                           substr(o.created_at, 1, 7) AS month,
+                           EXISTS(SELECT 1 FROM exceptions e WHERE e.order_id = o.order_id) AS has_exception
+                    FROM orders o JOIN warehouses w ON w.id = o.warehouse_id
+                    WHERE w.region = '华南' AND o.created_at >= '2026-09-01' AND o.created_at < '2026-11-01'
+                )
+                SELECT "周起始日", SUM(has_exception), COUNT(*),
+                       ROUND(100.0 * SUM(has_exception) / COUNT(*), 2)
+                FROM south_orders
+                GROUP BY "周起始日"%s ORDER BY "周起始日" LIMIT 200
+                """;
+        String splitWeek = weeklySql.formatted(", month");
+        String wholeWeek = weeklySql.formatted("");
+        MockMvc endpoint = askEndpoint("test-credential");
+        response = round -> completion(false);
+        for (String prefix : List.of("9、10 月运输异常率", "华南呢")) {
+            endpoint.perform(post("/ask").contentType(MediaType.APPLICATION_JSON)
+                            .content(mapper.createObjectNode().put("session_id", "weekly")
+                                    .put("question", prefix).toString()))
+                    .andExpect(status().isOk());
+        }
+        assertTrue(requests.get(0).at("/messages/0/content").asText().contains("2026 年 9 月、2026 年 10 月"));
+        requests.clear();
+        response = round -> {
+            JsonNode result = completion(false);
+            ObjectNode message = (ObjectNode) result.at("/choices/0/message");
+            switch (round) {
+                case 1 -> {
+                    message.putNull("content");
+                    var calls = message.putArray("tool_calls");
+                    addCall(calls, "metric", "lookup_metric", "{\"term\":\"M02\"}");
+                    addCall(calls, "schema", "describe_table", "{\"name\":\"orders\"}");
+                }
+                case 2, 3 -> {
+                    JsonNode messages = requests.get(round - 1).path("messages");
+                    String outcome = messages.get(messages.size() - 1).path("content").asText();
+                    if (round == 2 || outcome.contains("\"error\":")) {
+                        message.putNull("content");
+                        String sql = round == 2 ? splitWeek : wholeWeek;
+                        addCall(message.putArray("tool_calls"), "query-" + round, "run_sql",
+                                mapper.createObjectNode().put("sql", sql).toString());
+                    } else {
+                        message.put("content", "周报查询完成。");
+                    }
+                }
+                default -> message.put("content", "周报查询完成。");
+            }
+            return result;
+        };
+        String body = endpoint.perform(post("/ask").contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"session_id":"weekly","question":"再按周拆一下"}
+                                """))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("answered"))
+                .andExpect(jsonPath("$.metric_id").value("M02"))
+                .andExpect(jsonPath("$.sql.length()").value(2))
+                .andReturn().getResponse().getContentAsString(java.nio.charset.StandardCharsets.UTF_8);
+
+        JsonNode rows = mapper.readTree(body).path("table").path("rows");
+        assertEquals(9, rows.size());
+        List<JsonNode> crossing = new java.util.ArrayList<>();
+        rows.forEach(row -> {
+            if (row.path(0).asText().equals("2026-09-28")) {
+                crossing.add(row);
+            }
+        });
+        assertEquals(1, crossing.size());
+        assertEquals(mapper.readTree("[\"2026-09-28\",7,48,14.58]"), crossing.get(0));
+        JsonNode repair = requests.get(2).path("messages");
+        assertTrue(repair.get(repair.size() - 1).path("content").asText().contains("同一自然周"));
     }
 
     @Test

@@ -2,15 +2,19 @@ package com.opsdata.agent;
 
 import java.io.IOException;
 import java.sql.SQLException;
+import java.time.DateTimeException;
+import java.time.DayOfWeek;
 import java.time.LocalDate;
 import java.time.ZoneId;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Deque;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
@@ -45,6 +49,9 @@ final class AskService {
     private static final String NO_EVIDENCE = "INSUFFICIENT_EVIDENCE:";
     private static final Pattern VAGUE_SHIPMENT = Pattern.compile("怎么样|如何|好不好|好坏|表现|情况");
     private static final Pattern PHONE_FIELDS = Pattern.compile("手机号|手机号码|联系电话|客户电话");
+    private static final Pattern WEEKLY_REGROUP = Pattern.compile(
+            "(?:(?:那就|那|再|请|麻烦|接着|改成|换成)\\s*)*按(?:自然)?周"
+                    + "(?:\\s*(?:拆分?|分组|汇总|统计|看)(?:一下)?)?\\s*[呢吧]?[？?。]?");
     // 只接受不带筛选条件的整表行数请求，避免把整表行数当成经营指标。
     private static final Pattern TABLE_ROW_COUNT = Pattern.compile(
             "(?:请问\\s*|请查\\s*)?`?([a-zA-Z_][a-zA-Z0-9_]*)`?\\s*(?:表\\s*)?"
@@ -76,6 +83,8 @@ final class AskService {
             若查询范围在覆盖区间之外、没有数据、字段不存在、用户要求修改数据，或工具描述不支持该任务，
             用 INSUFFICIENT_EVIDENCE: 开头并说明原因，不输出估算值。
             上文仅用于理解指标、时间和筛选条件。追问只改变明确提到的条件，继承其他条件并重新查询。
+            自然周从星期一到星期日。追问只要求改为按周时，保留上文的指标、区域和完整时间筛选，
+            将原有时间分组替换为自然周。跨月的同一周应重新聚合分子和分母，不能分别计算两个月的部分。
             若指标不明确，且上一轮未澄清，用 NEED_CLARIFY: 开头。反问时复述已经识别的时间范围，
             对出库问题给出出库及时率、出库票量、运输异常率三个选项。不要追问已知条件。
             若上一轮已经澄清，要保留时间等条件并执行。仍未选定指标时默认 M01（出库及时率），
@@ -138,6 +147,7 @@ final class AskService {
             scope = QuestionScope.read(history.getLast().question(), today);
         }
         String missingDateEvidence = scope.missingEvidence();
+        boolean weeklyRegroup = !history.isEmpty() && WEEKLY_REGROUP.matcher(question).matches();
         boolean vagueShipment = question.contains("出库") && VAGUE_SHIPMENT.matcher(question).find();
         boolean mentionsMetric = (vagueShipment || awaitingClarification) && mentionsMetric(question);
         boolean mustClarify = !awaitingClarification && vagueShipment && !mentionsMetric
@@ -157,6 +167,10 @@ final class AskService {
             }
         }
         String countTarget = null;
+        if (weeklyRegroup) {
+            hints += "本轮只按自然周分组，保留上文所有筛选。SQL 只按周起始日分组，月份只用于筛选。"
+                    + "结果必须包含别名为「周起始日」的列，使用 YYYY-MM-DD 格式的星期一日期，每周一行。";
+        }
         if (tableCountsOnly) {
             hints += "本次查数只能用 list_tables 获取表行数，run_sql 不接收 SQL。";
             Matcher countRequest = TABLE_ROW_COUNT.matcher(question);
@@ -175,7 +189,7 @@ final class AskService {
             messages.addObject().put("role", "assistant").put("content", reply);
         }
         messages.addObject().put("role", "user").put("content", question);
-        Turn turn = new Turn();
+        Turn turn = new Turn(weeklyRegroup);
         turn.useDefault = useDefault;
 
         // 一步是模型的一次决策和它发出的工具调用，trace 按实际调用分别记录。
@@ -312,6 +326,9 @@ final class AskService {
         try {
             var result = database.run(sql);
             turn.sql.add(sql);
+            if (turn.weeklyRegroup) {
+                validateWeeklyRows(result);
+            }
             turn.result = result;
             turn.lastSqlError = null;
             outcome.set("columns", mapper.valueToTree(result.columns()));
@@ -321,6 +338,33 @@ final class AskService {
             // 保留这次提交给 SQLite 的原句和错误，模型收到后可以修改。
             turn.sql.add(sql);
             throw exception;
+        }
+    }
+
+    private void validateWeeklyRows(ReadOnlyDatabase.QueryResult result) {
+        if (result.rows().isEmpty()) {
+            return;
+        }
+        int weekColumn = result.columns().indexOf("周起始日");
+        String weekFormat = "请用「周起始日」列返回每个自然周的星期一日期，格式为 YYYY-MM-DD。";
+        if (weekColumn < 0) {
+            throw new IllegalArgumentException(weekFormat);
+        }
+        Set<LocalDate> weeks = new HashSet<>();
+        for (List<Object> row : result.rows()) {
+            LocalDate week;
+            try {
+                week = LocalDate.parse(Objects.toString(row.get(weekColumn), ""));
+            } catch (DateTimeException exception) {
+                throw new IllegalArgumentException(weekFormat);
+            }
+            if (week.getDayOfWeek() != DayOfWeek.MONDAY) {
+                throw new IllegalArgumentException(weekFormat);
+            }
+            if (!weeks.add(week)) {
+                throw new IllegalArgumentException("同一自然周出现多行。请仅按周起始日聚合，"
+                        + "保留原时间和区域筛选，去掉按月分组，重新计算分子和分母。");
+            }
         }
     }
 
@@ -430,6 +474,7 @@ final class AskService {
     private record Exchange(String question, String metricId, String clarification) {}
 
     private static final class Turn {
+        private final boolean weeklyRegroup;
         private boolean defaultRequested;
         private boolean useDefault;
         private boolean queryLimited;
@@ -441,6 +486,10 @@ final class AskService {
         private int attempts;
         private String lastSqlError;
         private ReadOnlyDatabase.QueryResult result;
+
+        private Turn(boolean weeklyRegroup) {
+            this.weeklyRegroup = weeklyRegroup;
+        }
 
         private Answer answer(String status, String content) {
             String metricId = metrics.size() == 1 ? metrics.keySet().iterator().next() : null;

@@ -19,9 +19,11 @@ record QuestionScope(List<DateRange> periods, String invalidDate) {
     private static final Pattern PERIOD = Pattern.compile(
             "(?<!\\d)(?<numericYear>\\d{4})(?<sep>[-/.])(?<numericMonth>\\d{1,2})"
                     + "(?:\\k<sep>(?<numericDay>\\d{1,2}))?(?!\\d)"
-                    + "|(?<![\\d/])(?<shortMonth>\\d{1,2})/(?<shortDay>\\d{1,2})(?![\\d/])"
+                    + "|(?<![\\d/])(?<shortMonth>\\d{1,2})[-/](?<shortDay>\\d{1,2})(?![\\d/]|\\s*月)"
+                    + "|(?<![\\d/])(?<listedMonth>\\d{1,2})(?=(?:\\s*[、,，和及与至到-]\\s*\\d{1,2})+\\s*月)"
                     + "|(?<!\\d)(?:(?<year>\\d{4})\\s*年\\s*)?(?<month>\\d{1,2})\\s*月"
                     + "(?:\\s*(?<day>\\d{1,2})\\s*[日号])?"
+                    + "|(?<relativeWeek>[上下本这]周|[上下这]个?(?:星期|礼拜)|本(?:星期|礼拜))(?<weekday>[一二三四五六日天])?"
                     + "|(?<relative>上个月|上月|本月|这个月|今天|昨天|昨日|前天|明天|明日)");
     private static final Pattern RANGE_SEPARATOR = Pattern.compile("\\s*(?:至|到|[-—–~～])\\s*");
 
@@ -50,6 +52,19 @@ record QuestionScope(List<DateRange> periods, String invalidDate) {
     }
 
     private static DateRange readPeriod(Matcher match, LocalDate today) {
+        if (match.group("relativeWeek") != null) {
+            int offset = switch (match.group("relativeWeek").charAt(0)) {
+                case '上' -> -1;
+                case '下' -> 1;
+                default -> 0;
+            };
+            LocalDate monday = today.minusDays(today.getDayOfWeek().getValue() - 1).plusWeeks(offset);
+            String weekday = match.group("weekday");
+            if (weekday == null) {
+                return new DateRange(monday, monday.plusDays(6));
+            }
+            return DateRange.day(monday.plusDays("一二三四五六日".indexOf(weekday.replace('天', '日'))));
+        }
         if (match.group("relative") != null) {
             return switch (match.group("relative")) {
                 case "上个月", "上月" -> DateRange.month(YearMonth.from(today).minusMonths(1));
@@ -63,6 +78,9 @@ record QuestionScope(List<DateRange> periods, String invalidDate) {
         if (match.group("shortMonth") != null) {
             return DateRange.day(LocalDate.of(FIRST_DATA_DAY.getYear(),
                     Integer.parseInt(match.group("shortMonth")), Integer.parseInt(match.group("shortDay"))));
+        }
+        if (match.group("listedMonth") != null) {
+            return DateRange.month(YearMonth.of(FIRST_DATA_DAY.getYear(), Integer.parseInt(match.group("listedMonth"))));
         }
         boolean numeric = match.group("numericYear") != null;
         String year = match.group(numeric ? "numericYear" : "year");
