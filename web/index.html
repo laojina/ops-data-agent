@@ -20,9 +20,11 @@
             <button id="new-chat" class="new-chat" type="button">
                 <span aria-hidden="true">＋</span> 新对话
             </button>
-            <nav id="history-nav" class="history-nav" aria-label="本轮提问" hidden>
-                <h2>本轮提问</h2>
+            <nav class="history-nav" aria-labelledby="history-title">
+                <h2 id="history-title">历史对话</h2>
+                <p id="history-empty">发送问题后，对话会显示在这里。</p>
                 <ol id="history-links"></ol>
+                <p id="history-notice" role="status" hidden>无法保存到浏览器。请保留此页面，以免丢失当前记录。</p>
             </nav>
             <div class="data-scope">
                 <span>样例数据范围</span>
@@ -51,7 +53,7 @@
                             </button>
                         </div>
                     </section>
-                    <section id="query-history" aria-label="对话历史"></section>
+                    <section id="query-history" aria-label="当前对话"></section>
                 </div>
             </div>
             <footer class="composer-area">

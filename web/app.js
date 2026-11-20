@@ -6,9 +6,14 @@ const turnTemplate = document.querySelector("#turn-template");
 const submitButton = document.querySelector("#submit-question");
 const newChat = document.querySelector("#new-chat");
 const welcome = document.querySelector("#welcome");
-const historyNav = document.querySelector("#history-nav");
 const historyLinks = document.querySelector("#history-links");
-let sessionId = crypto.randomUUID();
+const historyEmpty = document.querySelector("#history-empty");
+const historyNotice = document.querySelector("#history-notice");
+const TURN_KEY_PREFIX = "ops-data-agent:turn:v1:";
+const ACTIVE_CHAT_KEY = "ops-data-agent:active-conversation";
+const conversations = new Map();
+const pendingTurns = new Set();
+let activeSessionId = null;
 
 const number = new Intl.NumberFormat("zh-CN");
 const SQL_TOKEN = /--[^\r\n]*|\/\*[\s\S]*?\*\/|'(?:''|[^'])*'|"(?:""|[^"])*"|\x60(?:\x60\x60|[^\x60])*\x60|\[[^\]]*\]|\d+(?:\.\d*)?(?:[eE][+-]?\d+)?|[\p{L}_][\p{L}\p{N}_$]*|<=|>=|<>|!=|==|\s+|./gsu;
@@ -241,27 +246,107 @@ function renderTrace(details, trace, elapsed) {
     });
 }
 
-function addPendingTurn(question) {
-    const turn = turnTemplate.content.firstElementChild.cloneNode(true);
-    turn.querySelector(".turn-question").textContent = question;
-    welcome.hidden = true;
-    queryHistory.append(turn);
+function readHistory() {
+    const entries = [];
+    try {
+        for (const key of Object.keys(localStorage)) {
+            if (!key.startsWith(TURN_KEY_PREFIX)) {
+                continue;
+            }
+            let entry;
+            try {
+                entry = JSON.parse(localStorage.getItem(key));
+            } catch {
+                continue;
+            }
+            if (entry?.id && entry.sessionId && typeof entry.question === "string" && Number.isFinite(entry.sentAt)) {
+                entries.push(entry);
+            }
+        }
+    } catch {
+        historyNotice.hidden = false;
+    }
+    entries.sort((first, second) => first.sentAt - second.sentAt).forEach(rememberTurn);
+}
 
-    const label = document.createElement("button");
-    label.type = "button";
-    label.textContent = question;
-    label.title = question;
-    label.addEventListener("click", () => turn.scrollIntoView({ block: "start" }));
-    const item = document.createElement("li");
-    item.append(label);
-    historyLinks.append(item);
-    historyNav.hidden = false;
-    turn.scrollIntoView({ block: "end" });
+function rememberTurn(entry) {
+    if (!conversations.has(entry.sessionId)) {
+        conversations.set(entry.sessionId, []);
+    }
+    conversations.get(entry.sessionId).push(entry);
+}
+
+function saveTurn(entry) {
+    // 每条问答单独保存，其他标签页写入自己的问答时不会覆盖整段历史。
+    try {
+        localStorage.setItem(TURN_KEY_PREFIX + entry.id, JSON.stringify(entry));
+    } catch {
+        historyNotice.hidden = false;
+    }
+}
+
+function renderHistory() {
+    const items = document.createDocumentFragment();
+    const newestFirst = [...conversations.entries()].sort(([, first], [, second]) =>
+        second.at(-1).sentAt - first.at(-1).sentAt);
+    for (const [sessionId, turns] of newestFirst) {
+        const label = document.createElement("button");
+        label.type = "button";
+        label.textContent = turns[0].question;
+        label.title = turns[0].question;
+        if (sessionId === activeSessionId) {
+            label.setAttribute("aria-current", "true");
+        }
+        label.addEventListener("click", () => {
+            if (sessionId !== activeSessionId) {
+                openConversation(sessionId);
+                historyLinks.querySelector('[aria-current="true"]').focus();
+            }
+        });
+        const item = document.createElement("li");
+        item.append(label);
+        items.append(item);
+    }
+    historyLinks.replaceChildren(items);
+    historyEmpty.hidden = conversations.size > 0;
+}
+
+function updateSubmitButton() {
+    submitButton.disabled = pendingTurns.has(conversations.get(activeSessionId)?.at(-1));
+}
+
+function openConversation(sessionId) {
+    activeSessionId = conversations.has(sessionId) ? sessionId : null;
+    try {
+        // 每个标签页独立记住自己正在看的对话，历史内容仍由同一浏览器共享。
+        sessionStorage.setItem(ACTIVE_CHAT_KEY, activeSessionId ?? "");
+    } catch {
+        // 会话存储不可用时，仍允许在当前页面切换对话。
+    }
+    queryHistory.replaceChildren();
+    queryForm.reset();
+    const turns = conversations.get(activeSessionId) ?? [];
+    welcome.hidden = turns.length > 0;
+    turns.forEach(renderTurn);
+    conversationScroll.scrollTop = conversationScroll.scrollHeight;
+    renderHistory();
+    updateSubmitButton();
+}
+
+function renderTurn(entry) {
+    const turn = turnTemplate.content.firstElementChild.cloneNode(true);
+    turn.querySelector(".turn-question").textContent = entry.question;
+    queryHistory.append(turn);
+    if (!pendingTurns.has(entry)) {
+        const result = entry.result ?? errorReply("这条问题的答复未保存，可以重新发送。");
+        showReply(turn, result, entry.elapsed ?? 0);
+    }
     return turn;
 }
 
-function showReply(turn, result, elapsed) {
-    const wasAtBottom = conversationScroll.scrollHeight - conversationScroll.scrollTop - conversationScroll.clientHeight < 120;
+function showReply(turn, result, elapsed, scrollToReply = false) {
+    const wasAtBottom = scrollToReply
+        && conversationScroll.scrollHeight - conversationScroll.scrollTop - conversationScroll.clientHeight < 120;
     turn.dataset.status = result.status;
     turn.querySelector(".thinking").hidden = true;
     turn.querySelector(".turn-answer").textContent = result.answer;
@@ -300,12 +385,7 @@ questionField.addEventListener("keydown", (event) => {
 });
 
 newChat.addEventListener("click", () => {
-    sessionId = crypto.randomUUID();
-    queryHistory.replaceChildren();
-    historyLinks.replaceChildren();
-    historyNav.hidden = true;
-    welcome.hidden = false;
-    queryForm.reset();
+    openConversation(null);
     questionField.focus({ preventScroll: true });
 });
 
@@ -315,15 +395,28 @@ queryForm.addEventListener("submit", async (event) => {
     if (!question || submitButton.disabled) {
         return;
     }
-    const turn = addPendingTurn(question);
+    const sessionId = activeSessionId ?? crypto.randomUUID();
+    const entry = { id: crypto.randomUUID(), sessionId, question, sentAt: Date.now(), result: null };
+    pendingTurns.add(entry);
+    rememberTurn(entry);
+    saveTurn(entry);
+    if (activeSessionId === null) {
+        openConversation(sessionId);
+    } else {
+        renderTurn(entry);
+        renderHistory();
+        updateSubmitButton();
+    }
+    queryHistory.lastElementChild.scrollIntoView({ block: "end" });
     const started = performance.now();
-    const timer = turn.querySelector(".thinking-time");
     const clock = window.setInterval(() => {
-        timer.textContent = Math.floor((performance.now() - started) / 1000) + " 秒";
+        if (activeSessionId === sessionId) {
+            const timer = queryHistory.lastElementChild.querySelector(".thinking-time");
+            timer.textContent = Math.floor((performance.now() - started) / 1000) + " 秒";
+        }
     }, 250);
     queryForm.reset();
-    submitButton.disabled = true;
-    newChat.disabled = true;
+    questionField.focus({ preventScroll: true });
 
     let result;
     try {
@@ -337,9 +430,22 @@ queryForm.addEventListener("submit", async (event) => {
         result = errorReply("连接失败。请从 Java 启动日志里的网址打开页面。");
     } finally {
         window.clearInterval(clock);
-        submitButton.disabled = false;
-        newChat.disabled = false;
     }
-    showReply(turn, result, performance.now() - started);
-    questionField.focus({ preventScroll: true });
+    entry.result = result;
+    entry.elapsed = performance.now() - started;
+    saveTurn(entry);
+    pendingTurns.delete(entry);
+    if (activeSessionId === sessionId) {
+        showReply(queryHistory.lastElementChild, result, entry.elapsed, true);
+        updateSubmitButton();
+    }
 });
+
+readHistory();
+let previousSessionId;
+try {
+    previousSessionId = sessionStorage.getItem(ACTIVE_CHAT_KEY);
+} catch {
+    // 会话存储不可用时，从空白对话开始。
+}
+openConversation(previousSessionId);
