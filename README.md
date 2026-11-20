@@ -1,43 +1,65 @@
 # 经营数据问答 Agent
 
-这是 Java 17、Spring Boot 3.2 和 SQLite 的经营数据问答项目。支持自然语言查数、九条指标的口径查询和多轮对话。
+用自然语言查询仓库出库、运输异常和履约指标。模型通过原生 Tool Calling 读取指标字典和表结构，再生成 SQLite 查询。页面展示本轮结果、口径 ID、原始 SQL 和每步调用记录，便于复核。
 
-## 运行
+技术栈为 Java 17、Spring Boot 3.2、Maven、SQLite 和原生 JavaScript。应用以单进程运行，默认端口为 8000。仓库中的业务数据均为可重建的样例数据。
 
-在项目根目录使用 Java 17 和 Maven 3.6.3 或以上版本。首次构建需要下载 Maven 依赖。项目的 .mvn 设置使用 Maven Central，可通过用户级 Maven 设置配置网络代理。
+## 快速启动
+
+准备 JDK 17、Maven 3.6.3 或更新版本，以及支持原生 Tool Calling 的 OpenAI 兼容接口。首次构建需要下载 Maven 依赖。使用完整交付分支：
+
+```powershell
+git clone --branch feature/bi-agent https://github.com/laojina/ops-data-agent.git
+cd ops-data-agent
+```
+
+在项目根目录新建被 Git 忽略的 `.env.local`，填入使用方提供的模型配置。也可以用同名环境变量注入。下面的地址和模型名是本项目的默认配置。
+
+```properties
+LLM_API_KEY=在本机填入模型凭据
+LLM_BASE_URL=https://api.deepseek.com
+LLM_MODEL=deepseek-flash
+```
+
+在项目根目录依次执行：
 
 ```powershell
 mvn spring-boot:run "-Dspring-boot.run.arguments=--seed"
 mvn spring-boot:run
+```
+
+第一条根据 [seed.sql](seed.sql) 生成 `data/ops.db` 后退出。第二条启动服务，打开日志中 `Open in browser:` 后面的网址，默认是 [http://localhost:8000/](http://localhost:8000/)。如果使用 IDEA，运行 `OpsDataApplication`，将工作目录设为仓库根目录。
+
+跑自动化测试：
+
+```powershell
 mvn test
 ```
 
-- 第一条从 `seed.sql` 重建 `data/ops.db`。脚本执行成功后才替换现有数据库。
-- 第二条启动网页。在控制台找到 `Open in browser:`，点击后面的网址。默认是 `http://localhost:8000/`。
-- 第三条运行基线测试。每项通过后会输出一行 `PASS`，Maven 最后汇总运行数、失败数、错误数和跳过数。测试使用临时数据库，可以独立运行。
+预期共 12 项通过。测试自建临时 SQLite 数据库，并使用本地模型替身验证协议和重写流程，无需模型凭据。真实模型调用可用下面的请求单独验证。
 
-## 查询指标口径
+## 调用接口
 
-在项目根目录的本机配置文件 `.env.local` 中设置 `LLM_API_KEY=你的模型凭据`，也可以使用同名环境变量。默认连接 DeepSeek 官方 API 和 `deepseek-flash`。其他 OpenAI 兼容平台可另设 `LLM_BASE_URL` 与 `LLM_MODEL`。本机配置由 Git 忽略，换凭据后重启服务。
-
-启动网页并输入「运输异常率怎么算？」，也可以用 PowerShell 调用接口。
+在运行服务的同时，在另一个 PowerShell 窗口直接复制下面的请求：
 
 ```powershell
-$body = @{ session_id = 'stage2-demo'; question = '运输异常率怎么算？' } | ConvertTo-Json -Compress
-Invoke-RestMethod -Method Post -Uri 'http://localhost:8000/ask' -ContentType 'application/json; charset=utf-8' -Body ([Text.Encoding]::UTF8.GetBytes($body))
+$body = @{
+    session_id = [guid]::NewGuid().ToString()
+    question = '运输异常率怎么算？'
+} | ConvertTo-Json -Compress
+Invoke-RestMethod -Method Post -Uri 'http://localhost:8000/ask' `
+    -ContentType 'application/json; charset=utf-8' -Body ([Text.Encoding]::UTF8.GetBytes($body))
 ```
 
-展开「查看调用记录」，可以看到模型生成的工具请求、Java 从 `data/metrics.json` 命中的 M02、模型最终答复。两次模型调用的 token 来自接口实际返回的 `usage`。工具记录包含输入、命中口径和耗时。删除所使用的 Key 并重启后，`/ask` 会返回 `status: error`。
+`POST /ask` 接收非空字符串 `session_id` 和 `question`。非法输入返回 HTTP 400。有效请求返回 HTTP 200，`status` 区分 `answered`、`need_clarify`、`insufficient_evidence` 和 `error`。响应还包含 `answer`、`metric_id`、`sql`、`table` 和 `trace`。其中 `sql` 按提交给 SQLite 的顺序保存原文，`table` 包含 `columns`、`rows` 和 `truncated`。
 
-
-### 真实调用验收
-
-实测问题为「运输异常率怎么算？」。模型发起 `lookup_metric`，Java 按原工具调用 ID 回传 M02，模型给出运输异常率的分子和分母。以下为实测响应节选，token 取自 DeepSeek 返回的用量。
+上述定义查询的真实 DeepSeek 响应节选如下。这里展开了首轮模型调用和命中口径的工具记录。模型用量来自接口响应的 `usage`，耗时由服务计量，复跑时数值会变化。
 
 ```json
 {
   "status": "answered",
   "metric_id": "M02",
+  "sql": [],
   "trace": [
     {
       "type": "model",
@@ -51,136 +73,84 @@ Invoke-RestMethod -Method Post -Uri 'http://localhost:8000/ask' -ContentType 'ap
       "outcome": {"metric": {"id": "M02"}},
       "tokens": null,
       "latency_ms": 9
-    },
-    {
-      "type": "model",
-      "name": "deepseek-flash",
-      "tokens": {"prompt_tokens": 533, "completion_tokens": 108, "total_tokens": 641},
-      "latency_ms": 953
     }
   ]
 }
 ```
 
+完整 trace 的每一步包含 `type`、`name`、`input`、`outcome`、`tokens` 和 `latency_ms`。网页可折叠查看 SQL 和调用记录，也可以复制原始 SQL。左栏历史保存在当前浏览器。后端按 `session_id` 保留最近六轮提问、已选口径和澄清信息，旧查询的数值不会交给下一轮模型。服务重启后，模型上下文重新开始。
 
-## 查看 SQLite 数据
+## 模型、口径和执行边界
 
-第一条命令将数据库文件生成在项目根目录的 `data/ops.db`。在支持 SQLite 的 Navicat 中，新建 SQLite 连接，类型选择「现有数据库文件」，选中该文件并连接。展开左侧「表」，双击 `warehouses`、`orders` 或 `exceptions` 查看数据。在 Windows 上重新建库前可以先关闭该连接，避免文件被占用。
+1. [AskService.java](src/main/java/com/opsdata/agent/AskService.java) 注册 `list_tables`、`describe_table`、`lookup_metric` 和 `run_sql` 四个工具。系统提示词和工具描述负责指导工具选择、澄清和上下文继承。
+2. [ModelClient.java](src/main/java/com/opsdata/agent/ModelClient.java) 发送带工具定义的模型请求。Java 执行工具后通过原 `tool_call_id` 回传结果。模型根据口径和结构编写 SQL，并在看到执行结果或报错后决定是否继续。每轮最多六次模型决策，SQL 最多尝试三次。
+3. [MetricDictionary.java](src/main/java/com/opsdata/agent/MetricDictionary.java) 在查口径时读取 [data/metrics.json](data/metrics.json)，按 ID、名称或别名精确查找。指标的分子、分母、时间字段和可用维度以字典为准。
+4. [ReadOnlyDatabase.java](src/main/java/com/opsdata/agent/ReadOnlyDatabase.java) 检查单条 `SELECT`、业务表白名单和最外层整数 `LIMIT`，用只读 SQLite 连接执行，每次最多返回 200 行。DDL、DML、多语句和缺最外层 `LIMIT` 的查询会被拒绝。超出数据范围或要求导出不存在的客户手机号时，服务明确说明原因；改订单状态不受支持。
+5. Java 用本轮 SQLite 结果生成查数答复和表格。口径解释从字典生成。缺少模型 Key 时，`/ask` 返回 `error`，查询结果为空。
 
-## 样例数据与口径
+样例库含 4 个仓库、1,203 笔订单、182 条异常，覆盖 2026 年 9 月 1 日至 10 月 31 日。可用 Navicat 打开 `data/ops.db`，查看 `warehouses`、`orders` 和 `exceptions`。
 
-基础数据由 `seed.sql` 自建，包含 4 个仓库、1,203 个订单和 182 条运输异常，业务数据覆盖 2026 年 9 月至 10 月。脚本用固定序列生成样例，重建后结果一致。
-
-`data/metrics.json` 是指标口径字典。M01–M04 使用题面定义，并补足以下字段和时间规则：
-
-| 指标 | 基线采用的时间或字段 |
+| 口径 | 时间字段与计算要点 |
 | --- | --- |
-| M01 出库及时率 | 按实际出库时间归期，分母为已出库订单。 |
-| M02 运输异常率 | 按订单创建时间归期，分子按订单去重，分母为全部订单。 |
-| M03 破损率 | 按出库时间归期。异常表的 `damaged_pieces` 记录破损件数，分母为出库件数。 |
-| M04 履约达成率 | 用订单的 `promised_delivery_at` 与 `signed_at` 判断。按承诺签收日归期，分母为到期且未取消的订单，包含到期未签收。 |
+| M01 出库及时率 | 按实际出库时间归期。分子为及时出库订单数，分母为已出库订单数。 |
+| M02 运输异常率 | 按订单创建时间归期。有异常记录的订单按订单 ID 去重，分母为全部订单。 |
+| M03 破损率 | 按实际出库时间归期。破损件数除以出库件数，分母中的每笔订单只计一次。 |
+| M04 履约达成率 | 按承诺签收日归期。及时签收订单数除以应签收订单数，分母含到期未签收订单并排除已取消订单。 |
+| M09 破损金额率 | 按实际出库时间归期。破损金额除以出库金额。 |
 
-M05–M08 为自行补充的口径，依次是出库票量、延误订单率、出库件量和出库金额。M09 破损金额率随模拟的 main 数据更新加入。时间值按同一业务日历解释，周按周一开始。
+M05 至 M08 依次为出库票量、延误订单率、出库件量和出库金额。前三个 `FIX-SEP` 订单可手算核对 M01、M02、M03、M04，依次为 1/2、1/3、1/10、1/3。`FIX-CROSS` 创建于 9 月、出库于 10 月，可检查两个时间字段的归期差异。
 
-## 可手算的核对样例
+## 公开用例
 
-只看 `FIX-SEP-01` 至 `FIX-SEP-03` 这三个订单时，两条异常都属于同一个订单，M02 为 **1/3**。三个订单中两个已出库，其中一个及时，M01 为 **1/2**。同一组订单的 M03 为 **1/10**，M04 为 **1/3**。另有 `FIX-CROSS`，创建于 9 月，实际出库发生在 10 月，可用来检查按不同时间字段归期。
+演示相对时间时，将业务日期固定为 2026 年 11 月 19 日。可向 IDEA 的 Program arguments 添加 `--agent.today=2026-11-19`，或用下面的命令启动：
 
-## 查数链路和提示词
+```powershell
+mvn spring-boot:run "-Dspring-boot.run.arguments=--agent.today=2026-11-19"
+```
 
-[AskService.java](src/main/java/com/opsdata/agent/AskService.java) 中的系统提示词负责告诉模型何时查口径、如何承接时间和维度、怎样使用工具。每个工具另外有自己的 description。模型发出的原生工具调用和真实 token 都在 trace 里，一步是一次模型决策及其返回的工具调用。
+每组从「新对话」开始。箭头后面的追问在同一会话里发送。
 
-- 模型负责选择工具、从口径和表结构生成 SQL、根据错误决定是否重写。
-- Java 负责执行边界。歧义提问先澄清，空范围和缺失敏感字段会在执行 SQL 之前返回明确的原因。
-- [ReadOnlyDatabase.java](src/main/java/com/opsdata/agent/ReadOnlyDatabase.java) 用解析器检查单条 SELECT、业务表白名单和最外层 LIMIT，再用 SQLite 只读连接执行。结果最多 200 行，禁用附件数据库和加载扩展，并设置查询时间上限。
-- 查数答案和表格由本轮 SQLite 结果生成。会话只给模型提供最近六轮提问、口径标识和澄清信息。SQL 和旧结果不进入后续轮次的历史。
-
-## 公开用例与合并验证
-
-以下用本机真实 DeepSeek 接口复核，数字另用独立 SQLite 查询比对。验收日期固定为 2026 年 11 月 19 日。演示「上个月」时，可先在 PowerShell 设置 `$env:AGENT_TODAY = '2026-11-19'` 再启动。
-
-| 提问或场景 | 预期及实测结果 |
+| 输入 | 核对结果 |
 | --- | --- |
-| 10 月华东出库及时率 | M01，及时 136 单、已出库 160 单，85.00%。 |
-| 上个月出库怎么样 → 看出库及时率 | 先带 10 月和三个口径选项澄清，随后按四个仓库查询 M01。 |
-| 9 月和 10 月运输异常率对比 | M02，16.06% 和 14.02%，异常按订单去重。 |
-| 继续问华南呢 | 沿用 M02 和两个月，返回 15.92% 和 14.14%。 |
-| 11 月及时率、导出手机号、修改订单状态 | 返回 insufficient_evidence，分别说明覆盖范围、字段缺失和只读能力。 |
-| 用户澄清后仍未选口径 | 说明默认用出库及时率衡量时效，并按原时间范围分仓查询。 |
-| 合并后的 10 月成都二号仓 | 出库票量 2 单，破损金额率 0.8333%。 |
+| 10 月华东区出库及时率是多少 | M01，及时 136 单、已出库 160 单，85.00%。 |
+| 上个月出库怎么样 → 看出库及时率 | 首轮 `need_clarify`，复述 10 月并询问口径。第二轮沿用 10 月，按仓返回 M01。 |
+| 9 月和 10 月运输异常率对比 → 华南呢 | M02。全部仓库 16.06%、14.02%。追问改为华南后，两个月分别为 15.92%、14.14%。 |
+| 11 月的及时率呢 | `insufficient_evidence`，解释数据只到 10 月 31 日。 |
+| 把客户的手机号导出来 | 说明样例库没有该字段。 |
+| 帮我把 10 月延误订单改成已处理 | 说明只支持查询。 |
+| 上个月出库怎么样 → 我也不确定，你选一个 | 澄清一次后默认 M01，并说明选择原因，沿用 10 月。 |
+| 10 月成都二号仓出库票量 / 10 月成都二号仓破损金额率 | M05 为 2 单。M09 为 25/3000，约 0.8333%。 |
 
-10 月华东问法的真实响应节选
+### 四个走查变异
 
-~~~json
-{
-  "status": "answered",
-  "metric_id": "M01",
-  "sql": [
-    "SELECT ROUND(SUM(CASE WHEN o.shipped_at IS NOT NULL AND o.shipped_at <= o.promised_at THEN 1 ELSE 0 END) * 100.0 / NULLIF(SUM(CASE WHEN o.shipped_at IS NOT NULL THEN 1 ELSE 0 END), 0), 2) AS \"出库及时率(%)\", SUM(CASE WHEN o.shipped_at IS NOT NULL THEN 1 ELSE 0 END) AS \"出库票量\", SUM(CASE WHEN o.shipped_at IS NOT NULL AND o.shipped_at <= o.promised_at THEN 1 ELSE 0 END) AS \"及时出库票量\" FROM orders o JOIN warehouses w ON o.warehouse_id = w.id WHERE w.region = '华东' AND o.shipped_at >= '2026-10-01' AND o.shipped_at < '2026-11-01' LIMIT 200"
-  ],
-  "table": {
-    "columns": [
-      "出库及时率(%)",
-      "出库票量",
-      "及时出库票量"
-    ],
-    "rows": [
-      [
-        85.0,
-        160,
-        136
-      ]
-    ],
-    "truncated": false
-  },
-  "model_calls": [
-    {
-      "name": "deepseek-flash",
-      "total_tokens": 1156,
-      "latency_ms": 932
-    },
-    {
-      "name": "deepseek-flash",
-      "total_tokens": 1454,
-      "latency_ms": 1231
-    },
-    {
-      "name": "deepseek-flash",
-      "total_tokens": 1968,
-      "latency_ms": 1425
-    },
-    {
-      "name": "deepseek-flash",
-      "total_tokens": 2192,
-      "latency_ms": 1244
-    }
-  ]
-}
-~~~
+在独立副本中复测。每次使用新会话提交同一道题。
 
-## 四个走查变异
-
-在独立副本中复测，测试后的业务文件仍以 Git 里的合并版本为准。
-
-| 改动 | 实测行为 |
+| 改动 | 复测依据 |
 | --- | --- |
-| 清空模型 Key 后重启 | `/ask` 返回 error，提示缺少 LLM_API_KEY，SQL 和结果表为空。 |
-| 将 M02 的 denominator 改为对应订单的异常记录条数 | 同一问题的计算随字典改变。9 月约 98.98%，10 月 100.00%。 |
-| 将 run_sql 工具描述改成「仅用于统计表行数」 | 模型收到新描述。指标 SQL 受限，Java 反馈当前能力不足。 |
-| 在 seed.sql 加一条 10 月华东迟出库订单后重建库 | 同一问法从 85.00% 变为 84.47%。 |
-
-第三项可通过启动参数复现。
+| 去掉模型 Key 并重启 | 重问 10 月华东及时率。`/ask` 返回 `error`，SQL 与表格为空。 |
+| 仅将字典里 M02 的 `denominator` 改成统计范围内关联的异常记录条数 | 重问 9 月和 10 月运输异常率。保留按订单去重的分子，结果变为 97/98 和 84/84，约 98.98% 和 100.00%。展开 trace 核对新口径。 |
+| 将 `run_sql` 的描述改为「仅用于统计表行数」 | 使用下方的启动命令。模型收到新描述，执行层也会限制指标查询。重问及时率，检查能力不足的答复和 trace。 |
+| 新增一笔 10 月华东的迟出库订单，重新建库 | 用 `--seed` 命令重建数据库。重问 10 月华东及时率，分子仍为 136，分母变为 161，结果约 84.47%。 |
 
 ```powershell
 mvn spring-boot:run "-Dspring-boot.run.arguments=--agent.tools.run-sql-description=仅用于统计表行数"
 ```
 
-## SQL 重写与代码复核
+### SQL 重写与代码复核
 
-[ModelToolCallingTest.java](src/test/java/com/opsdata/agent/ModelToolCallingTest.java) 使用本地模型替身，让第一次工具调用提交 `SELECT missing_column FROM orders LIMIT 1`。SQLite 真正执行并返回 `no such column: missing_column`。服务按原工具调用 ID 把错误交还给模型，替身随后改成查固定样例的已出库订单数。测试确认本轮答复使用实际的 2 单，并忽略替身文本里另写的数字。这条测试可随 `mvn test` 重现。
+[SQL 重写测试](src/test/java/com/opsdata/agent/ModelToolCallingTest.java) 让模型替身首次提交 `SELECT missing_column FROM orders LIMIT 1`。SQLite 执行后返回 `no such column: missing_column`，Java 按原工具调用 ID 回传错误。替身重写后查到 2 笔已出库订单，最终答复取自该次查询。若重写仍然失败，服务返回错误。
 
-复核 AI 生成的查询时发现，`status = '已出库'` 会漏掉状态已变为「已签收」的订单，直接用两个整数相除也会把小比例截成零。工具描述、指标字典和系统提示词明确用 `shipped_at` 识别已出库订单，先用浮点数再做除法。成都二号仓的件数破损率 `1/30` 与金额破损率 `25/3000` 可现场手算对照。
+```powershell
+mvn "-Dtest=ModelToolCallingTest#passesSqliteErrorBackAndDisplaysOnlyTheActualQueryValue" test
+```
+
+复核 AI 生成的 SQL 时发现，`status = '已出库'` 会漏掉已经出库、后来签收的订单。M01 按 `shipped_at` 识别已出库订单，并先乘 `100.0` 再除，避免 SQLite 的整数除法截断。华东 10 月的 136/160，以及成都二号仓分别按件数和金额计算的 1/30、25/3000，可作为对账样例。
 
 ## Git 交付
 
-`feature/bi-agent` 从 `exam-base` 开始，合并提交 `eaee6af` 纳入了 `main` 的模拟更新 `753033a`。解决 `seed.sql` 和 `data/metrics.json` 的冲突后，保留了月末样例、成都二号仓、10 月下旬订单和 M09。提交或演示时使用 `feature/bi-agent`。
+在确认未提供起始仓库后，自建 `exam-base` 基线并从该处开发 `feature/bi-agent`。`main` 上的模拟数据更新 `753033a` 通过 `eaee6af` 合入功能分支。`seed.sql` 与 `data/metrics.json` 的冲突保留了两边的数据和口径改动。合并后使用成都二号仓、M09 和原华东 M01 用例复测。
+
+```powershell
+git log --graph --oneline --decorate --all
+git show -s --format="%h %p %s" eaee6af
+```
