@@ -36,7 +36,7 @@ mvn spring-boot:run
 mvn test
 ```
 
-预期共 15 项通过。测试自建临时 SQLite 数据库，并使用本地模型替身验证协议、日期边界、工具权限和重写流程，无需模型凭据。真实模型调用可用下面的请求单独验证。
+预期共 16 项通过。测试自建临时 SQLite 数据库，并使用本地模型替身验证协议、日期边界、工具权限和重写流程，无需模型凭据。真实模型调用可用下面的请求单独验证。
 
 ## 调用接口
 
@@ -45,34 +45,62 @@ mvn test
 ```powershell
 $body = @{
     session_id = [guid]::NewGuid().ToString()
-    question = '运输异常率怎么算？'
+    question = '10 月华东区出库及时率是多少'
 } | ConvertTo-Json -Compress
 Invoke-RestMethod -Method Post -Uri 'http://localhost:8000/ask' `
-    -ContentType 'application/json; charset=utf-8' -Body ([Text.Encoding]::UTF8.GetBytes($body))
+    -ContentType 'application/json; charset=utf-8' -Body ([Text.Encoding]::UTF8.GetBytes($body)) |
+    ConvertTo-Json -Depth 20
 ```
 
 `POST /ask` 接收非空字符串 `session_id` 和 `question`。非法输入返回 HTTP 400。有效请求返回 HTTP 200，`status` 区分 `answered`、`need_clarify`、`insufficient_evidence` 和 `error`。响应还包含 `answer`、`metric_id`、`sql`、`table` 和 `trace`。其中 `sql` 按提交给 SQLite 的顺序保存原文，`table` 包含 `columns`、`rows` 和 `truncated`。
 
-上述定义查询的真实 DeepSeek 响应节选如下。这里展开了首轮模型调用和命中口径的工具记录。模型用量来自接口响应的 `usage`，耗时由服务计量，复跑时数值会变化。
+上述请求的真实 DeepSeek 响应节选如下。口径为 M01，华东 10 月及时出库 136 单、已出库 160 单，**136 ÷ 160 = 85.00%**。节选保留了执行的 SQL、结果表和关键调用。模型用量来自接口响应的 `usage`，耗时由服务计量，复跑时数值会变化。
 
 ```json
 {
   "status": "answered",
-  "metric_id": "M02",
-  "sql": [],
+  "metric_id": "M01",
+  "sql": ["SELECT COUNT(*) AS \"已出库订单数\",\n       SUM(CASE WHEN o.shipped_at <= o.promised_at THEN 1 ELSE 0 END) AS \"及时出库订单数\",\n       ROUND(SUM(CASE WHEN o.shipped_at <= o.promised_at THEN 1 ELSE 0 END) * 100.0 / NULLIF(COUNT(*), 0), 2) AS \"出库及时率(%)\"\nFROM orders o\nJOIN warehouses w ON w.id = o.warehouse_id\nWHERE w.region = '华东'\n  AND o.shipped_at IS NOT NULL\n  AND o.shipped_at >= '2026-10-01' AND o.shipped_at < '2026-11-01'\nLIMIT 10"],
+  "table": {
+    "columns": ["已出库订单数", "及时出库订单数", "出库及时率(%)"],
+    "rows": [[160, 136, 85.0]],
+    "truncated": false
+  },
   "trace": [
     {
       "type": "model",
       "name": "deepseek-flash",
-      "tokens": {"prompt_tokens": 372, "completion_tokens": 41, "total_tokens": 413},
-      "latency_ms": 1124
+      "tokens": {"prompt_tokens": 1237, "completion_tokens": 62, "total_tokens": 1299, "prompt_tokens_details": {"cached_tokens": 1024}, "prompt_cache_hit_tokens": 1024, "prompt_cache_miss_tokens": 213},
+      "latency_ms": 1066
     },
     {
       "type": "tool",
       "name": "lookup_metric",
-      "outcome": {"metric": {"id": "M02"}},
-      "tokens": null,
-      "latency_ms": 9
+      "outcome": {"metric": {"id": "M01"}},
+      "latency_ms": 1
+    },
+    {
+      "type": "model",
+      "name": "deepseek-flash",
+      "tokens": {"prompt_tokens": 1531, "completion_tokens": 66, "total_tokens": 1597, "prompt_tokens_details": {"cached_tokens": 1280}, "prompt_cache_hit_tokens": 1280, "prompt_cache_miss_tokens": 251},
+      "latency_ms": 619
+    },
+    {
+      "type": "model",
+      "name": "deepseek-flash",
+      "tokens": {"prompt_tokens": 1871, "completion_tokens": 205, "total_tokens": 2076, "prompt_tokens_details": {"cached_tokens": 1536}, "prompt_cache_hit_tokens": 1536, "prompt_cache_miss_tokens": 335},
+      "latency_ms": 1536
+    },
+    {
+      "type": "tool",
+      "name": "run_sql",
+      "latency_ms": 80
+    },
+    {
+      "type": "model",
+      "name": "deepseek-flash",
+      "tokens": {"prompt_tokens": 2134, "completion_tokens": 171, "total_tokens": 2305, "prompt_tokens_details": {"cached_tokens": 1920}, "prompt_cache_hit_tokens": 1920, "prompt_cache_miss_tokens": 214},
+      "latency_ms": 2050
     }
   ]
 }
@@ -116,7 +144,7 @@ mvn spring-boot:run "-Dspring-boot.run.arguments=--agent.today=2026-11-19"
 | 上个月出库怎么样 → 看出库及时率 | 首轮 `need_clarify`，复述 10 月并询问口径。第二轮沿用 10 月，按仓返回 M01。 |
 | 9 月和 10 月运输异常率对比 → 华南呢 | M02。全部仓库 16.06%、14.02%。追问改为华南后，两个月分别为 15.92%、14.14%。 |
 | 11 月的及时率呢 | `insufficient_evidence`，解释数据只到 10 月 31 日。 |
-| 查 2026-11-02 这天的履约达成率 | `insufficient_evidence`，明确 11 月 2 日没有观测数据，SQL 为空。斜杠和中文日期同样按天校验。 |
+| 查 2026-11-02 或 11/2 这天的履约达成率 | `insufficient_evidence`，明确 2026 年 11 月 2 日没有观测数据，SQL 为空。月/日简写采用样例年份。 |
 | 对比 9 月和 11 月的履约达成率 | `insufficient_evidence`，明确 11 月缺数据，并说明 9 月在覆盖范围内、可单独查询。 |
 | 把客户的手机号导出来 | 说明样例库没有该字段。 |
 | 帮我把 10 月延误订单改成已处理 | 说明只支持查询。 |
@@ -146,6 +174,8 @@ mvn spring-boot:run "-Dspring-boot.run.arguments=--agent.tools.run-sql-descripti
 ```powershell
 mvn spring-boot:run "-Dspring-boot.run.arguments=--agent.tools.table-counts-only=true --agent.tools.run-sql-description=只允许统计表的总行数。不得查询经营指标。"
 ```
+
+在这个模式下，问「orders 表有多少行」返回 `answered` 和 `list_tables` 查出的 1,203 行，`sql` 为空。另开会话问「10 月华东区出库及时率是多少」，仍返回 `insufficient_evidence`。
 
 ### SQL 重写与代码复核
 

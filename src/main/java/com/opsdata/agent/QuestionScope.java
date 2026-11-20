@@ -19,6 +19,7 @@ record QuestionScope(List<DateRange> periods, String invalidDate) {
     private static final Pattern PERIOD = Pattern.compile(
             "(?<!\\d)(?<numericYear>\\d{4})(?<sep>[-/.])(?<numericMonth>\\d{1,2})"
                     + "(?:\\k<sep>(?<numericDay>\\d{1,2}))?(?!\\d)"
+                    + "|(?<![\\d/])(?<shortMonth>\\d{1,2})/(?<shortDay>\\d{1,2})(?![\\d/])"
                     + "|(?<!\\d)(?:(?<year>\\d{4})\\s*年\\s*)?(?<month>\\d{1,2})\\s*月"
                     + "(?:\\s*(?<day>\\d{1,2})\\s*[日号])?"
                     + "|(?<relative>上个月|上月|本月|这个月|今天|昨天|昨日|前天|明天|明日)");
@@ -58,6 +59,10 @@ record QuestionScope(List<DateRange> periods, String invalidDate) {
                 case "明天", "明日" -> DateRange.day(today.plusDays(1));
                 default -> DateRange.day(today);
             };
+        }
+        if (match.group("shortMonth") != null) {
+            return DateRange.day(LocalDate.of(FIRST_DATA_DAY.getYear(),
+                    Integer.parseInt(match.group("shortMonth")), Integer.parseInt(match.group("shortDay"))));
         }
         boolean numeric = match.group("numericYear") != null;
         String year = match.group(numeric ? "numericYear" : "year");

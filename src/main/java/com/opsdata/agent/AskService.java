@@ -13,6 +13,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
@@ -44,6 +45,11 @@ final class AskService {
     private static final String NO_EVIDENCE = "INSUFFICIENT_EVIDENCE:";
     private static final Pattern VAGUE_SHIPMENT = Pattern.compile("怎么样|如何|好不好|好坏|表现|情况");
     private static final Pattern PHONE_FIELDS = Pattern.compile("手机号|手机号码|联系电话|客户电话");
+    // 只接受不带筛选条件的整表行数请求，避免把整表行数当成经营指标。
+    private static final Pattern TABLE_ROW_COUNT = Pattern.compile(
+            "(?:请问\\s*|请查\\s*)?`?([a-zA-Z_][a-zA-Z0-9_]*)`?\\s*(?:表\\s*)?"
+                    + "(?:(?:一共\\s*|总共\\s*)?有\\s*(?:多少|几)\\s*(?:行|条记录)"
+                    + "|(?:的\\s*)?总?行数(?:\\s*(?:是|有)\\s*多少)?)\\s*[？?。]?");
 
     private static final String SYSTEM_PROMPT = """
             你是经营数据问答助手。本轮只能使用已注册工具的能力，遵守每个工具的描述。
@@ -150,8 +156,14 @@ final class AskService {
                 hints += "用户还未选指标，直接用默认口径 M01 查询并注明原因。";
             }
         }
+        String countTarget = null;
         if (tableCountsOnly) {
             hints += "本次查数只能用 list_tables 获取表行数，run_sql 不接收 SQL。";
+            Matcher countRequest = TABLE_ROW_COUNT.matcher(question);
+            if (countRequest.matches()) {
+                countTarget = countRequest.group(1);
+                hints += "用户只问整张表的行数，请调用 list_tables。";
+            }
         }
         messages.addObject().put("role", "system").put("content", systemPrompt + hints);
         for (Exchange prior : history) {
@@ -236,6 +248,9 @@ final class AskService {
                 turn.trace.add(new Trace("tool", name, arguments, outcome, null, toolLatency));
                 messages.addObject().put("role", "tool").put("tool_call_id", id).put("content", outcome.toString());
             }
+            if (countTarget != null && !turn.listedTables.isEmpty()) {
+                return answerTableRowCount(turn, countTarget);
+            }
         }
         if (tableCountsOnly) {
             return insufficientToolCapability(turn);
@@ -257,7 +272,10 @@ final class AskService {
                         turn.metrics.put(metric.path("id").asText(), metric);
                     }
                 }
-                case LIST -> outcome.set("tables", mapper.valueToTree(database.listTables()));
+                case LIST -> {
+                    turn.listedTables = database.listTables();
+                    outcome.set("tables", mapper.valueToTree(turn.listedTables));
+                }
                 case DESCRIBE -> {
                     outcome.set("table", mapper.valueToTree(database.describe(requiredText(arguments, "name"))));
                     turn.schemaRead = true;
@@ -347,6 +365,17 @@ final class AskService {
         return turn.answer("insufficient_evidence", "目前的查询工具仅支持统计表行数，无法计算该指标。");
     }
 
+    private Answer answerTableRowCount(Turn turn, String tableName) {
+        for (ReadOnlyDatabase.TableInfo table : turn.listedTables) {
+            if (table.name().equalsIgnoreCase(tableName)) {
+                return new Answer("answered", table.name() + " 表有 " + table.rows() + " 行。",
+                        List.of(), null, new Table(List.of("表名", "行数"),
+                        List.of(List.of(table.name(), table.rows())), false), turn.trace);
+            }
+        }
+        return turn.answer("insufficient_evidence", "样例库没有 " + tableName + " 表。");
+    }
+
     private String summarizeRows(Turn turn) {
         var result = turn.result;
         // 查数答复中的数字直接取自这次结果，避免引用模型自行总结的数字。
@@ -405,6 +434,7 @@ final class AskService {
         private boolean useDefault;
         private boolean queryLimited;
         private final List<Trace> trace = new ArrayList<>();
+        private List<ReadOnlyDatabase.TableInfo> listedTables = List.of();
         private final List<String> sql = new ArrayList<>();
         private final Map<String, JsonNode> metrics = new LinkedHashMap<>();
         private boolean schemaRead;

@@ -177,7 +177,7 @@ class ModelToolCallingTest {
         SeedDatabase.create(Path.of("seed.sql"), directory.resolve("ops.db"));
         response = this::queryCompletion;
         MockMvc endpoint = askEndpoint("test-credential");
-        for (String date : List.of("2026-11-02", "2026/11/02", "2026年11月2日", "11月2号")) {
+        for (String date : List.of("11/2", "2026-11-02", "2026/11/02", "2026年11月2日", "11月2号")) {
             requests.clear();
             endpoint.perform(post("/ask").contentType(MediaType.APPLICATION_JSON)
                             .content(mapper.createObjectNode().put("session_id", date)
@@ -188,14 +188,15 @@ class ModelToolCallingTest {
                     .andExpect(jsonPath("$.sql.length()").value(0));
             assertEquals(1, requests.size());
         }
-        requests.clear();
-        endpoint.perform(post("/ask").contentType(MediaType.APPLICATION_JSON)
-                        .content("""
-                                {"session_id":"boundary","question":"2026-10-31 的出库票量是多少？"}
-                                """))
-                .andExpect(status().isOk())
-                .andExpect(jsonPath("$.status").value("answered"));
-        assertTrue(requests.get(0).at("/messages/0/content").asText().contains("2026 年 10 月 31 日"));
+        for (String date : List.of("10/31", "2026-10-31")) {
+            requests.clear();
+            endpoint.perform(post("/ask").contentType(MediaType.APPLICATION_JSON)
+                            .content(mapper.createObjectNode().put("session_id", date)
+                                    .put("question", date + " 的出库票量是多少？").toString()))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.status").value("answered"));
+            assertTrue(requests.get(0).at("/messages/0/content").asText().contains("2026 年 10 月 31 日"));
+        }
     }
 
     @Test
@@ -266,6 +267,45 @@ class ModelToolCallingTest {
             JsonNode tool = requests.get(0).at("/tools/3/function");
             assertEquals(description, tool.path("description").asText());
             assertTrue(tool.at("/parameters/properties/sql").isMissingNode());
+        }
+    }
+
+    @Test
+    void countsOnlyModeAnswersWholeTableCountFromListTables() throws Exception {
+        SeedDatabase.create(Path.of("seed.sql"), directory.resolve("ops.db"));
+        response = round -> {
+            JsonNode result = completion(false);
+            ObjectNode message = (ObjectNode) result.at("/choices/0/message");
+            if (round == 1) {
+                message.putNull("content");
+                addCall(message.putArray("tool_calls"), "table-count", "list_tables", "{}");
+            } else {
+                message.put("content", "INSUFFICIENT_EVIDENCE: 无法查询这个指标。");
+            }
+            return result;
+        };
+        MockMvc endpoint = askEndpoint("test-credential", "仅用于统计表行数", true);
+        endpoint.perform(post("/ask").contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"session_id":"table-count","question":"`orders` 表有多少行？"}
+                                """))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("answered"))
+                .andExpect(jsonPath("$.answer").value(org.hamcrest.Matchers.containsString("1203")))
+                .andExpect(jsonPath("$.table.rows[0][0]").value("orders"))
+                .andExpect(jsonPath("$.table.rows[0][1]").value(1203))
+                .andExpect(jsonPath("$.sql.length()").value(0))
+                .andExpect(jsonPath("$.trace[1].outcome.tables[1].rows").value(1203));
+
+        for (String question : List.of("10 月华东区出库及时率是多少？", "orders 表里 10 月份的订单有多少行？")) {
+            requests.clear();
+            endpoint.perform(post("/ask").contentType(MediaType.APPLICATION_JSON)
+                            .content(mapper.createObjectNode().put("session_id", question)
+                                    .put("question", question).toString()))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.status").value("insufficient_evidence"))
+                    .andExpect(jsonPath("$.table.rows.length()").value(0))
+                    .andExpect(jsonPath("$.sql.length()").value(0));
         }
     }
 
