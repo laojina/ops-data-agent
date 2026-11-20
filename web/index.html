@@ -3,38 +3,101 @@
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>经营数据问答 Agent</title>
+    <title>经营数据问答</title>
     <link rel="stylesheet" href="/styles.css">
     <script src="/app.js" defer></script>
 </head>
 <body>
-    <main>
-        <header>
-            <h1>经营数据问答 Agent</h1>
-            <button id="new-chat" type="button">新对话</button>
-        </header>
-        <section id="query-history" aria-label="对话历史"></section>
-        <form id="query-form">
-            <label for="question">经营数据问题</label>
-            <textarea id="question" rows="3" required
-                      placeholder="例如：10 月华东区出库及时率是多少？"></textarea>
-            <button id="submit-question" type="submit">提问</button>
-        </form>
-        <p id="query-status" role="status"></p>
-    </main>
+    <div class="workspace">
+        <aside class="sidebar" aria-label="对话导航">
+            <div class="brand">
+                <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
+                <div>
+                    <span class="brand-name">经营数据问答</span>
+                    <span class="brand-subtitle">经营分析工作台</span>
+                </div>
+            </div>
+            <button id="new-chat" class="new-chat" type="button">
+                <span aria-hidden="true">＋</span> 新对话
+            </button>
+            <nav id="history-nav" class="history-nav" aria-label="本轮提问" hidden>
+                <h2>本轮提问</h2>
+                <ol id="history-links"></ol>
+            </nav>
+            <div class="data-scope">
+                <span>样例数据范围</span>
+                <strong>2026 年 9–10 月</strong>
+            </div>
+        </aside>
+
+        <main class="chat">
+            <div id="conversation-scroll" class="conversation-scroll">
+                <div class="conversation">
+                    <section id="welcome" class="welcome" aria-labelledby="welcome-title">
+                        <h1 id="welcome-title">今天想查什么数据？</h1>
+                        <p>选择一道示例，或用自己的话问一个指标。</p>
+                        <div class="examples">
+                            <button type="button" data-question="10 月华东区出库及时率是多少？">
+                                <strong>出库及时率</strong>
+                                <span>10 月华东区出库及时率是多少？</span>
+                            </button>
+                            <button type="button" data-question="9 月和 10 月运输异常率对比">
+                                <strong>月份对比</strong>
+                                <span>9 月和 10 月运输异常率对比</span>
+                            </button>
+                            <button type="button" data-question="运输异常率怎么算？">
+                                <strong>查看指标口径</strong>
+                                <span>运输异常率怎么算？</span>
+                            </button>
+                        </div>
+                    </section>
+                    <section id="query-history" aria-label="对话历史"></section>
+                </div>
+            </div>
+            <footer class="composer-area">
+                <form id="query-form" class="composer">
+                    <label for="question" class="sr-only">经营数据问题</label>
+                    <textarea id="question" rows="2" required placeholder="输入一个经营数据问题…"></textarea>
+                    <div class="composer-actions">
+                        <span class="keyboard-hint">Enter 发送 · Shift + Enter 换行</span>
+                        <button id="submit-question" type="submit">发送 <span aria-hidden="true">↑</span></button>
+                    </div>
+                </form>
+            </footer>
+        </main>
+    </div>
+
     <template id="turn-template">
         <article class="turn">
             <h2 class="turn-question"></h2>
-            <p class="turn-answer"></p>
-            <div class="turn-result" hidden><table></table></div>
-            <details class="turn-sql" hidden>
-                <summary>查看实际执行的 SQL</summary>
-                <pre></pre>
-            </details>
-            <details class="turn-trace" hidden>
-                <summary>查看调用记录</summary>
-                <pre></pre>
-            </details>
+            <section class="agent-reply" aria-label="数据助手答复">
+                <header class="reply-header">
+                    <span class="brand-mark reply-mark" aria-hidden="true"><i></i><i></i><i></i></span>
+                    <strong>数据助手</strong>
+                    <span class="metric-tag" hidden></span>
+                </header>
+                <div class="thinking" role="status">
+                    <span class="thinking-dots" aria-hidden="true"><i></i><i></i><i></i></span>
+                    <span>正在处理问题</span>
+                    <span class="thinking-time" aria-hidden="true">0 秒</span>
+                </div>
+                <div class="reply-content" hidden>
+                    <p class="turn-answer" role="status"></p>
+                    <div class="turn-result" hidden><table></table></div>
+                    <details class="turn-sql evidence" hidden>
+                        <summary>查看实际执行的 SQL</summary>
+                        <div class="sql-statements"></div>
+                    </details>
+                    <details class="turn-trace evidence" hidden>
+                        <summary><span>查看调用记录</span><small class="trace-summary"></small></summary>
+                        <ol class="trace-steps"></ol>
+                        <details class="raw-trace">
+                            <summary>展开原始调用记录</summary>
+                            <pre></pre>
+                        </details>
+                    </details>
+                </div>
+            </section>
         </article>
     </template>
 </body>
