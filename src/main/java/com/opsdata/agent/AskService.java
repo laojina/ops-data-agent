@@ -37,6 +37,9 @@ final class AskService {
     private static final String LIST = "list_tables";
     private static final String DESCRIBE = "describe_table";
     private static final String RUN = "run_sql";
+    private static final String FULL_SQL_DESCRIPTION =
+            "根据已读取的表结构和指标字典执行一条带 LIMIT 的只读 SQLite 查询。返回列名、最多 200 行及是否截断。";
+    private static final String COUNTS_ONLY_DESCRIPTION = "仅用于统计表行数。请使用 list_tables 查看行数。";
     private static final String NEED_CLARIFY = "NEED_CLARIFY:";
     private static final String NO_EVIDENCE = "INSUFFICIENT_EVIDENCE:";
     private static final Pattern VAGUE_SHIPMENT = Pattern.compile("怎么样|如何|好不好|好坏|表现|情况");
@@ -44,6 +47,10 @@ final class AskService {
 
     private static final String SYSTEM_PROMPT = """
             你是经营数据问答助手。本轮只能使用已注册工具的能力，遵守每个工具的描述。
+            本轮 run_sql 的工具描述是：「%s」
+            查数前先判断这个描述是否允许用户请求。这项能力判断先于下面的查数流程。
+            若描述只允许统计表行数，出库及时率、运输异常率等经营指标超出能力范围，直接用
+            INSUFFICIENT_EVIDENCE: 说明原因，无需获取口径、表结构或尝试 SQL。
             口径问题先用 lookup_metric，最终回答以 METRIC_DEFINITION: 开头。
             查字典只传指标名称、别名或 ID，日期、区域和仓库名称留给 SQL 条件。
             查数时先取得一个指标口径和所需表结构，再生成 SQLite SELECT。
@@ -58,7 +65,8 @@ final class AskService {
             比率须由 SQL 计算并返回。SQLite 整数除法会截断，请先乘 1.0（百分比先乘 100.0）再除，
             并用 NULLIF 处理零分母。不可先用两个整数相除再转浮点或乘 100。
             查数时只用查询返回的值。若出现 SQL 错误，根据工具给出的错误和字段信息修复。已有正确结果就结束。
-            样例库覆盖 2026-09-01 至 2026-10-31。题目中无年份的月份按 2026 年理解。
+            样例库观测范围为 2026-09-01 至 2026-10-31。题目中无年份的日期按 2026 年理解。
+            选择统计期时用字典规定的时间字段，统计期只使用观测范围内的数据，不能把尚未观察的日期当作零值。
             若查询范围在覆盖区间之外、没有数据、字段不存在、用户要求修改数据，或工具描述不支持该任务，
             用 INSUFFICIENT_EVIDENCE: 开头并说明原因，不输出估算值。
             上文仅用于理解指标、时间和筛选条件。追问只改变明确提到的条件，继承其他条件并重新查询。
@@ -73,24 +81,30 @@ final class AskService {
     private final MetricDictionary dictionary;
     private final ReadOnlyDatabase database;
     private final ArrayNode tools;
+    private final String systemPrompt;
     private final LocalDate fixedDate;
     private final boolean tableCountsOnly;
     private final Map<String, Deque<Exchange>> sessions = new ConcurrentHashMap<>();
 
     AskService(ObjectMapper mapper, ModelClient model, MetricDictionary dictionary, ReadOnlyDatabase database,
-               @Value("${agent.tools.run-sql-description:根据已读取的表结构和指标字典执行一条带 LIMIT 的只读 SQLite 查询。返回列名、最多 200 行及是否截断。}") String sqlDescription,
+               @Value("${agent.tools.run-sql-description:}") String sqlDescription,
+               @Value("${agent.tools.table-counts-only:false}") boolean tableCountsOnly,
                @Value("${agent.today:}") String dateOverride) {
         this.mapper = mapper;
         this.model = model;
         this.dictionary = dictionary;
         this.database = database;
         this.fixedDate = dateOverride.isBlank() ? null : LocalDate.parse(dateOverride);
-        this.tableCountsOnly = "仅用于统计表行数".equals(sqlDescription.strip());
+        this.tableCountsOnly = tableCountsOnly;
         this.tools = mapper.createArrayNode();
         register(LOOKUP, "按名称、别名或 ID 查询指标字典，回答口径或生成指标查询前使用。", "term");
         register(LIST, "列出数据库中的经营表、行数和用途。表名不确定时使用。", null);
         register(DESCRIBE, "从 SQLite 读取指定表的字段、类型、可用维度和枚举值。写 SQL 前使用。", "name");
-        register(RUN, sqlDescription, "sql");
+        if (sqlDescription.isBlank()) {
+            sqlDescription = tableCountsOnly ? COUNTS_ONLY_DESCRIPTION : FULL_SQL_DESCRIPTION;
+        }
+        this.systemPrompt = SYSTEM_PROMPT.formatted(sqlDescription);
+        register(RUN, sqlDescription, tableCountsOnly ? null : "sql");
     }
 
     Answer ask(String sessionId, String question) {
@@ -114,9 +128,10 @@ final class AskService {
         LocalDate today = fixedDate == null ? LocalDate.now(ZoneId.of("Asia/Shanghai")) : fixedDate;
         boolean awaitingClarification = !history.isEmpty() && !history.getLast().clarification().isEmpty();
         QuestionScope scope = QuestionScope.read(question, today);
-        if (scope.months().isEmpty() && awaitingClarification) {
+        if (scope.periods().isEmpty() && scope.invalidDate() == null && awaitingClarification) {
             scope = QuestionScope.read(history.getLast().question(), today);
         }
+        String missingDateEvidence = scope.missingEvidence();
         boolean vagueShipment = question.contains("出库") && VAGUE_SHIPMENT.matcher(question).find();
         boolean mentionsMetric = (vagueShipment || awaitingClarification) && mentionsMetric(question);
         boolean mustClarify = !awaitingClarification && vagueShipment && !mentionsMetric
@@ -124,10 +139,10 @@ final class AskService {
         boolean useDefault = awaitingClarification && !mentionsMetric;
         boolean missingSensitiveField = PHONE_FIELDS.matcher(question).find();
         String hints = "当前业务日期（北京时间）为 " + today + "。";
-        if (!scope.months().isEmpty()) {
-            hints += "本次已识别的月份为 " + scope.label() + "。";
+        if (!scope.periods().isEmpty()) {
+            hints += "本次已识别的时间范围为 " + scope.label() + "。";
         }
-        if (scope.outOfRange() || mustClarify || missingSensitiveField) {
+        if (missingDateEvidence != null || mustClarify || missingSensitiveField) {
             hints += "本轮无需调用工具，请说明数据范围或向用户澄清指标。";
         } else if (awaitingClarification) {
             hints += "本轮回答上一轮的澄清。承接上月或已识别的时间，按仓库分组。";
@@ -135,7 +150,10 @@ final class AskService {
                 hints += "用户还未选指标，直接用默认口径 M01 查询并注明原因。";
             }
         }
-        messages.addObject().put("role", "system").put("content", SYSTEM_PROMPT + hints);
+        if (tableCountsOnly) {
+            hints += "本次查数只能用 list_tables 获取表行数，run_sql 不接收 SQL。";
+        }
+        messages.addObject().put("role", "system").put("content", systemPrompt + hints);
         for (Exchange prior : history) {
             messages.addObject().put("role", "user").put("content", prior.question());
             String reply = prior.clarification().isEmpty()
@@ -175,12 +193,11 @@ final class AskService {
             if (missingSensitiveField) {
                 return turn.answer("insufficient_evidence", "样例库没有客户手机号字段，无法导出。");
             }
-            if (scope.outOfRange()) {
-                return turn.answer("insufficient_evidence",
-                        "样例库只覆盖 2026 年 9 月 1 日至 10 月 31 日。" + scope.label() + "没有可用数据。");
+            if (missingDateEvidence != null) {
+                return turn.answer("insufficient_evidence", missingDateEvidence);
             }
             if (mustClarify) {
-                String period = scope.months().isEmpty() ? "" : scope.label() + "的";
+                String period = scope.periods().isEmpty() ? "" : scope.label() + "的";
                 return turn.answer("need_clarify", "你想看" + period + "出库及时率、出库票量，还是运输异常率？");
             }
             if (!hasCalls) {
@@ -220,7 +237,7 @@ final class AskService {
                 messages.addObject().put("role", "tool").put("tool_call_id", id).put("content", outcome.toString());
             }
         }
-        if (turn.queryLimited) {
+        if (tableCountsOnly) {
             return insufficientToolCapability(turn);
         }
         return turn.answer("error", "已达到本轮调用上限。");
@@ -245,7 +262,14 @@ final class AskService {
                     outcome.set("table", mapper.valueToTree(database.describe(requiredText(arguments, "name"))));
                     turn.schemaRead = true;
                 }
-                case RUN -> runQuery(turn, outcome, requiredText(arguments, "sql"), readyToQuery);
+                case RUN -> {
+                    if (tableCountsOnly) {
+                        turn.queryLimited = true;
+                        outcome.put("error", "当前工具仅用于统计表行数。请使用 list_tables，无法执行指标 SQL。");
+                    } else {
+                        runQuery(turn, outcome, requiredText(arguments, "sql"), readyToQuery);
+                    }
+                }
                 default -> outcome.put("error", "未知工具：" + name);
             }
         } catch (IllegalArgumentException | SQLException exception) {
@@ -260,12 +284,6 @@ final class AskService {
     }
 
     private void runQuery(Turn turn, ObjectNode outcome, String sql, boolean readyToQuery) throws SQLException {
-        if (tableCountsOnly) {
-            // 行数由 list_tables 提供。当配置缩小能力时，查指标的 SQL 留在 trace 中供核对。
-            turn.queryLimited = true;
-            outcome.put("error", "当前工具仅用于统计表行数。请使用 list_tables，无法执行指标 SQL。");
-            return;
-        }
         if (!readyToQuery) {
             throw new IllegalArgumentException("请先获取一个口径和表结构，再根据工具结果编写 SQL。");
         }
@@ -299,6 +317,9 @@ final class AskService {
             return turn.answer("need_clarify", content.substring(NEED_CLARIFY.length()).strip());
         }
         if (content.startsWith(NO_EVIDENCE)) {
+            if (tableCountsOnly) {
+                return insufficientToolCapability(turn);
+            }
             return turn.answer("insufficient_evidence", content.substring(NO_EVIDENCE.length()).strip());
         }
         if (turn.result != null) {
@@ -315,6 +336,9 @@ final class AskService {
             JsonNode metric = turn.metrics.values().iterator().next();
             return turn.answer("answered", metric.path("definition").asText() + "\n分子：" + metric.path("numerator").asText()
                     + "\n分母：" + metric.path("denominator").asText("无"));
+        }
+        if (tableCountsOnly) {
+            return insufficientToolCapability(turn);
         }
         return turn.answer("insufficient_evidence", "本次没有查询结果可作为答案依据。");
     }

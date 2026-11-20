@@ -38,7 +38,7 @@
     "aliases": ["签收达成率", "签收及时率"],
     "definition": "统计期内到承诺签收日且未取消的订单中，在承诺日或之前签收的订单占比。",
     "numerator": "应签收订单中 orders.signed_at 非空且其日期不晚于 orders.promised_delivery_at 日期的订单数。",
-    "denominator": "承诺签收日期落在统计期内且状态不为已取消的订单数，包含到期未签收订单。",
+    "denominator": "承诺签收日期落在统计期内且状态不为已取消的订单数，包含到期未签收订单。样例观测仅到 2026-10-31，承诺签收日期晚于观测截止日的订单尚未到期，不计入分母。",
     "time_field": "orders.promised_delivery_at",
     "dimensions": ["仓库", "区域", "周", "月"],
     "unit": "比例"

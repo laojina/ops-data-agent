@@ -172,6 +172,56 @@ class ModelToolCallingTest {
         System.out.println("PASS | Vague shipment, unavailable dates and missing sensitive fields stay outside SQL.");
     }
 
+    @Test
+    void refusesOutOfWindowDaysInCommonDateFormatsBeforeRunningSql() throws Exception {
+        SeedDatabase.create(Path.of("seed.sql"), directory.resolve("ops.db"));
+        response = this::queryCompletion;
+        MockMvc endpoint = askEndpoint("test-credential");
+        for (String date : List.of("2026-11-02", "2026/11/02", "2026年11月2日", "11月2号")) {
+            requests.clear();
+            endpoint.perform(post("/ask").contentType(MediaType.APPLICATION_JSON)
+                            .content(mapper.createObjectNode().put("session_id", date)
+                                    .put("question", "查 " + date + " 的履约达成率").toString()))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.status").value("insufficient_evidence"))
+                    .andExpect(jsonPath("$.answer").value(org.hamcrest.Matchers.containsString("2026 年 11 月 2 日")))
+                    .andExpect(jsonPath("$.sql.length()").value(0));
+            assertEquals(1, requests.size());
+        }
+        requests.clear();
+        endpoint.perform(post("/ask").contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"session_id":"boundary","question":"2026-10-31 的出库票量是多少？"}
+                                """))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("answered"));
+        assertTrue(requests.get(0).at("/messages/0/content").asText().contains("2026 年 10 月 31 日"));
+    }
+
+    @Test
+    void reportsOnlyTheUncoveredPartOfAComparisonOrRange() throws Exception {
+        response = round -> completion(false);
+        MockMvc endpoint = askEndpoint("test-credential");
+        endpoint.perform(post("/ask").contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"session_id":"compare","question":"对比 9 月和 11 月的履约达成率"}
+                                """))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("insufficient_evidence"))
+                .andExpect(jsonPath("$.answer").value(org.hamcrest.Matchers.containsString("2026 年 11 月没有可用数据")))
+                .andExpect(jsonPath("$.answer").value(org.hamcrest.Matchers.containsString("2026 年 9 月在样例库覆盖范围内")))
+                .andExpect(jsonPath("$.sql.length()").value(0));
+        endpoint.perform(post("/ask").contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"session_id":"range","question":"查询 2026-10-30 至 2026-11-02 的履约达成率"}
+                                """))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("insufficient_evidence"))
+                .andExpect(jsonPath("$.answer").value(org.hamcrest.Matchers.containsString("2026 年 11 月 1 日 至 2026 年 11 月 2 日没有可用数据")))
+                .andExpect(jsonPath("$.answer").value(org.hamcrest.Matchers.containsString("2026 年 10 月 30 日 至 2026 年 10 月 31 日在样例库覆盖范围内")))
+                .andExpect(jsonPath("$.sql.length()").value(0));
+    }
+
     private JsonNode queryCompletion(int round) {
         ObjectNode result = (ObjectNode) completion(false);
         ObjectNode message = (ObjectNode) result.at("/choices/0/message");
@@ -201,17 +251,37 @@ class ModelToolCallingTest {
     }
 
     @Test
-    void narrowerToolDescriptionPreventsMetricSqlEvenIfModelIgnoresIt() throws Exception {
+    void countsOnlyPermissionBlocksMetricSqlWithEitherToolDescription() throws Exception {
         response = round -> round < 3 ? queryCompletion(round) : completion(false);
-        askEndpoint("test-credential", "仅用于统计表行数").perform(post("/ask")
-                        .contentType(MediaType.APPLICATION_JSON)
-                        .content("{\"session_id\":\"scope\",\"question\":\"出库票量是多少？\"}"))
+        for (String description : List.of("仅用于统计表行数", "只允许统计表的总行数。不得查询经营指标。")) {
+            requests.clear();
+            askEndpoint("test-credential", description, true).perform(post("/ask")
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content("{\"session_id\":\"scope\",\"question\":\"出库票量是多少？\"}"))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.status").value("insufficient_evidence"))
+                    .andExpect(jsonPath("$.answer").value(org.hamcrest.Matchers.containsString("仅支持统计表行数")))
+                    .andExpect(jsonPath("$.sql.length()").value(0))
+                    .andExpect(jsonPath("$.trace[4].outcome.error").value(org.hamcrest.Matchers.containsString("仅用于统计表行数")));
+            JsonNode tool = requests.get(0).at("/tools/3/function");
+            assertEquals(description, tool.path("description").asText());
+            assertTrue(tool.at("/parameters/properties/sql").isMissingNode());
+        }
+    }
+
+    @Test
+    void changingOnlyTheDescriptionDoesNotChangeExecutionPermissions() throws Exception {
+        SeedDatabase.create(Path.of("seed.sql"), directory.resolve("ops.db"));
+        response = this::queryCompletion;
+        askEndpoint("test-credential", "仅用于统计表行数").perform(post("/ask").contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"session_id":"description","question":"出库票量是多少？"}
+                                """))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.status").value("insufficient_evidence"))
-                .andExpect(jsonPath("$.answer").value(org.hamcrest.Matchers.containsString("仅支持统计表行数")))
-                .andExpect(jsonPath("$.sql.length()").value(0));
+                .andExpect(jsonPath("$.status").value("answered"))
+                .andExpect(jsonPath("$.table.rows[0][0]").value(2));
         assertEquals("仅用于统计表行数", requests.get(0).at("/tools/3/function/description").asText());
-        System.out.println("PASS | Narrowing the visible tool description also prevents metric SQL execution.");
+        assertTrue(requests.get(0).at("/messages/0/content").asText().contains("本轮 run_sql 的工具描述是：「仅用于统计表行数」"));
     }
 
     private MockMvc askEndpoint(String key) {
@@ -219,11 +289,15 @@ class ModelToolCallingTest {
     }
 
     private MockMvc askEndpoint(String key, String description) {
+        return askEndpoint(key, description, false);
+    }
+
+    private MockMvc askEndpoint(String key, String description, boolean tableCountsOnly) {
         String base = "http://127.0.0.1:" + server.getAddress().getPort() + "/v1";
         var model = new ModelClient(mapper, key, base, "test-model");
         return MockMvcBuilders.standaloneSetup(new AskController(new AskService(mapper, model,
                 new MetricDictionary(mapper), new ReadOnlyDatabase(directory.resolve("ops.db").toString()),
-                description, "2026-11-19"))).build();
+                description, tableCountsOnly, "2026-11-19"))).build();
     }
 
     private JsonNode completion(boolean first) {
